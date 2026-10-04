@@ -9,7 +9,7 @@ const SESSION = '12345678-1234-4234-8234-123456789abc'
 const status = (): ClaudexStatus => ({
   policy: { CLAUDEX: 'on', CLAUDEX_ADVERSARY_MODEL: 'gpt-6-astra@xhigh' },
   policy_sources: { CLAUDEX: 'file' }, proxy: { up: false, ours: false, port: 18765 },
-  token_hours_left: null, plan: null,
+  token_hours_left: null, plan: null, models: null, deprecations: [],
 })
 const job = (id: string, state: ClaudexJob['state']): ClaudexJob => ({
   id, tier: 'adversary', kind: 'adversary', model: 'gpt-6-astra@xhigh', mode: 'read', cwd: '/repo',

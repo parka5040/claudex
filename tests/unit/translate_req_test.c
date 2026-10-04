@@ -1,5 +1,6 @@
 #include "test.h"
 #include "translate_req.h"
+#include "models.h"
 #include "rsig.h"
 #include "buf.h"
 
@@ -320,6 +321,24 @@ TEST(background_request_for_a_claude_model_goes_to_luna) {
     tr_free(&t);
 }
 
+TEST(unavailable_model_returns_overloaded_error_without_upstream_request) {
+    const char *catalog = "{\"models\":[{\"slug\":\"gpt-6-sol\",\"visibility\":\"list\",\"supported_in_api\":true}]}";
+    CHECK_INT(models_catalog_load(catalog, strlen(catalog)), 0);
+    models_mark_rejected("gpt-6-sol");
+    tr_t t = tr("{\"model\":\"gpt-terra\"," USER_HI "}");
+    CHECK_INT(t.rc, -529);
+    CHECK_STR(t.err, "no usable terra model; retry after the model list refreshes");
+    tr_free(&t);
+    t = tr("{\"model\":\"gpt-sol\"," USER_HI "}");
+    CHECK_INT(t.rc, -529);
+    CHECK_STR(t.err, "no usable sol model; retry after the model list refreshes");
+    tr_free(&t);
+    t = tr("{\"model\":\"gpt-7.1-luna\"," USER_HI "}");
+    CHECK_INT(t.rc, -529);
+    CHECK_STR(t.err, "no usable luna model; retry after the model list refreshes");
+    tr_free(&t);
+}
+
 int main(void) {
     RUN(minimal_request_gets_fixed_upstream_fields);
     RUN(non_streaming_client_is_recorded_but_upstream_still_streams);
@@ -341,5 +360,6 @@ int main(void) {
     RUN(tool_choice_mapping);
     RUN(session_id_is_taken_from_claude_code_metadata);
     RUN(background_request_for_a_claude_model_goes_to_luna);
+    RUN(unavailable_model_returns_overloaded_error_without_upstream_request);
     TEST_MAIN_END();
 }

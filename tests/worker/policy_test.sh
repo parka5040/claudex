@@ -5,7 +5,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 W="$ROOT/plugin/bin/claudex-worker"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/claudex-wt-XXXXXX")" || { printf '    FAIL: cannot create policy test directory\n' >&2; exit 1; }
-[[ -d "$TMP" ]] || { printf '    FAIL: policy test directory is missing\n' >&2; exit 1; }
+[[ -n "$TMP" && -d "$TMP" ]] || { printf '    FAIL: policy test directory is missing\n' >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 fails=0 checks=0
 PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
@@ -177,12 +177,15 @@ echo "attack this" | w CLAUDEX_ADVERSARY_MODEL=gpt-5.6-sol "$W" run adversary >/
 contains "superseded adversary slug still runs" "$(cat "$TMP/stub.log")" "[gpt-5.6-sol@high]"
 reset
 echo "attack this" | w CLAUDEX_ADVERSARY_MODEL=gpt-terra "$W" run adversary >/dev/null
-contains "deprecated adversary alias uses sol" "$(cat "$TMP/stub.log")" "[--model] [gpt-sol@high]"
+contains "deprecated adversary alias reaches proxy" "$(cat "$TMP/stub.log")" "[--model] [gpt-terra]"
 echo "x" | w CLAUDEX_TIERS=luna CLAUDEX_ADVERSARY_MODEL=gpt-5.6-sol "$W" run adversary >/dev/null 2>&1
 check "superseded slug is gated as its tier" "$?" "4"
 reset
 echo "task" | w CLAUDEX_TIERS=luna,terra "$W" run terra >/dev/null
-contains "terra starts as sol" "$(cat "$TMP/stub.log")" "[--model] [gpt-sol@high]"
+contains "terra tier reaches proxy as terra" "$(cat "$TMP/stub.log")" "[--model] [gpt-terra]"
+reset
+echo "task" | w CLAUDEX_TIERS=luna,terra "$W" run terra --effort xhigh >/dev/null
+contains "terra explicit effort is forwarded" "$(cat "$TMP/stub.log")" "[--model] [gpt-terra@xhigh]"
 check "terra and sol deduplicated" "$(echo task | w CLAUDEX_TIERS=luna,terra "$W" run sol >/dev/null 2>&1; echo $?)" "0"
 reset
 echo "x" | w "$W" run adversary --mode edit >/dev/null 2>&1; check "adversary refuses edit mode" "$?" "2"
@@ -213,6 +216,7 @@ check "start returns a job id" "$([[ "$job" =~ ^[a-z0-9-]+$ ]] && echo ok || ech
 out=$(w "$W" wait "$job" --timeout 0 2>&1); check "wait times out while running -> exit 5" "$?" "5"
 out=$(w "$W" wait "$job" --timeout 10);      check "wait succeeds" "$?" "0"
 contains "wait prints report" "$out" "stub report"
+contains "start terra sends the terra alias" "$(cat "$TMP/stub.log")" "[--model] [gpt-terra]"
 contains "result replays report" "$(w "$W" result "$job")" "stub report"
 w "$W" result 'no/such/../job' >/dev/null 2>&1; check "result validates job id" "$?" "2"
 

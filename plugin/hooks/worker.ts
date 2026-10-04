@@ -25,7 +25,13 @@ export function parseFindings(result: ProcessRunResult): ClaudexFinding[] | null
 }
 export const admitRequest = (root: string, tier: Tier, running: number): Request =>
   request(root, ['admit', tier, '--running', String(running)], { timeoutMs: 15_000 })
+export const resolveRequest = (root: string, cwd: string, path: string): Request =>
+  request(root, ['resolve', '--cwd', cwd, path], { timeoutMs: 5000 })
 export const stepArgv = (root: string, tier: Tier): string[] => [`${root}/bin/claudex-worker`, 'step', tier]
+export function shellQuote(s: string): string { return `'${s.replaceAll("'", "'\\''")}'` }
+export function sandboxCommand(root: string, cwd: string, command: string): string {
+  return `/usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin /bin/bash ${shellQuote(root + '/bin/claudex-worker')} sandbox --cwd ${shellQuote(cwd)} --path "$PATH" -c ${shellQuote(command)}`
+}
 export const statusRequest = (root: string): Request => request(root, ['status', '--json'], { timeoutMs: 15_000 })
 export function jobsRequest(root: string, options: { limit?: number; ids?: string[]; owner?: string } = {}): Request {
   const args = ['jobs', '--json']

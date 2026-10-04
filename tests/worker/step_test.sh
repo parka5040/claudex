@@ -5,14 +5,32 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 W="$ROOT/plugin/bin/claudex-worker"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/claudex-step-XXXXXX")" || { printf '    FAIL: cannot create step test directory\n' >&2; exit 1; }
-[[ -d "$TMP" ]] || { printf '    FAIL: step test directory is missing\n' >&2; exit 1; }
+[[ -n "$TMP" && -d "$TMP" ]] || { printf '    FAIL: step test directory is missing\n' >&2; exit 1; }
 fails=0 checks=0
 check() { checks=$((checks+1)); if [[ "$2" != "$3" ]]; then fails=$((fails+1)); printf '    FAIL: %s: got %q, want %q\n' "$1" "$2" "$3"; fi; }
 contains() { checks=$((checks+1)); case "$2" in *"$3"*) ;; *) fails=$((fails+1)); printf '    FAIL: %s: %q not in %q\n' "$1" "$3" "${2:0:400}";; esac; }
+child_is_running() {
+    local pid=$1 child running
+    [[ -n "$pid" ]] || return 1
+    running=$(jobs -pr)
+    while IFS= read -r child; do
+        [[ "$child" != "$pid" ]] || return 0
+    done <<< "$running"
+    return 1
+}
+signal_child() {
+    local pid=$1 signal=${2:-TERM}
+    child_is_running "$pid" || return 1
+    kill -s "$signal" "$pid" 2>/dev/null
+}
 cleanup() {
+    local pid
+    : > "$TMP/watchdog-cancel"
     if [[ -n "${job:-}" ]]; then w "$W" cancel "$job" >/dev/null 2>&1 || true; fi
-    [[ -z "${step_pid:-}" ]] || { kill "$step_pid" 2>/dev/null || true; wait "$step_pid" 2>/dev/null || true; }
-    [[ -z "${PROXY_PID:-}" ]] || { kill "$PROXY_PID" 2>/dev/null || true; wait "$PROXY_PID" 2>/dev/null || true; }
+    for pid in "${step_pid:-}" "${PROXY_PID:-}"; do signal_child "$pid" || true; done
+    for pid in "${step_pid:-}" "${PROXY_PID:-}" "${watchdog:-}"; do
+        [[ -z "$pid" ]] || wait "$pid" 2>/dev/null || true
+    done
     rm -rf -- "$TMP"
 }
 trap cleanup EXIT
@@ -103,7 +121,7 @@ request_count() { if [[ -f "$TMP/requests" ]]; then wc -l < "$TMP/requests" | tr
 
 printf '  step streams fixture events and changes only model and stream\n'
 expected_count=0
-for variant in 'sol gpt-sol' 'sol:xhigh gpt-sol@xhigh' 'terra gpt-sol'; do
+for variant in 'sol gpt-sol' 'sol:xhigh gpt-sol@xhigh' 'terra gpt-terra'; do
     tier=${variant%% *} model=${variant#* }
     args=("${tier%%:*}")
     [[ "$tier" != *:* ]] || args+=(--effort "${tier#*:}")
@@ -166,12 +184,21 @@ env -i HOME="$TMP" PATH="$PATH" CLAUDEX_CONFIG_FILE="$TMP/config" CLAUDEX_STATE_
 for ((i=0; i<50; i++)); do [[ -f "$TMP/holding" ]] && break; sleep 0.1; done
 check 'proxy is holding the step response' "$([[ -f "$TMP/holding" ]] && printf yes || printf no)" yes
 check 'held step allocated both files' "$([[ -n "$(compgen -G "$TMP/state/.step-input.*")" && -n "$(compgen -G "$TMP/state/.step-request.*")" ]] && printf yes || printf no)" yes
-( sleep 5; kill -KILL "$step_pid" 2>/dev/null || true ) & watchdog=$!
-kill -TERM "$step_pid" 2>/dev/null || true
+# The watchdog only writes owned flags; the parent alone checks and signals its jobs.
+(
+    for ((tick=0; tick<100; tick++)); do
+        [[ ! -f "$TMP/watchdog-cancel" ]] || exit 0
+        sleep 0.05
+    done
+    : > "$TMP/watchdog-timeout"
+) & watchdog=$!
+signal_child "$step_pid" TERM || true
+while child_is_running "$step_pid" && [[ ! -f "$TMP/watchdog-timeout" ]]; do sleep 0.05; done
+if [[ -f "$TMP/watchdog-timeout" ]]; then signal_child "$step_pid" KILL || true; fi
 wait "$step_pid" 2>/dev/null; rc=$?
-kill "$watchdog" 2>/dev/null || true
+: > "$TMP/watchdog-cancel"
 wait "$watchdog" 2>/dev/null || true
-step_pid=''
+step_pid='' watchdog=''
 check 'TERM step exit' "$rc" 143
 check 'TERM removes step input' "$(compgen -G "$TMP/state/.step-input.*" || true)" ''
 check 'TERM removes step request' "$(compgen -G "$TMP/state/.step-request.*" || true)" ''

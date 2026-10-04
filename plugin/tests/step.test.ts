@@ -11,6 +11,7 @@ const status: ClaudexStatus = {
   policy: { CLAUDEX: 'on', CLAUDEX_TIERS: 'sol', CLAUDEX_WORKER_MODE: 'edit' },
   policy_sources: { CLAUDEX: 'file', CLAUDEX_TIERS: 'file', CLAUDEX_WORKER_MODE: 'file' },
   proxy: { up: false, ours: false, port: 18765 }, token_hours_left: null, plan: null,
+  models: null, deprecations: [],
 }
 const agent = (changes: Partial<ClaudexAgent> = {}): ClaudexAgent => ({
   tier: 'sol', cwd: '/repo', prompt: 'Delegated task', mode: 'edit', model: 'gpt-sol', final: null, thinking: {}, ...changes,
@@ -72,6 +73,15 @@ function spawn($: Engine, id = 'a') {
 function registered(h: ReturnType<typeof harness>, id = 'a'): ClaudexAgent | undefined {
   return (h.state.get('claudex:agents')?.value as Record<string, ClaudexAgent> | undefined)?.[id]
 }
+async function approvedTools($: Engine, chunks: TurnStepChunk[]): Promise<void> {
+  const tools = chunks.filter(chunk => chunk.kind === 'tool')
+  expect(tools.length > 0).toBe(true)
+  for (const tool of tools) {
+    // Like synthetic agentId in tool.call, the kit accepts a real-call id here.
+    expect(await $.tool.check({ tool: tool.name, input: {}, tool_use_id: tool.id } as never))
+      .toEqual({ decision: 'allow', reason: 'claudex: GPT agent call, confined by claudex' })
+  }
+}
 
 test('buildRequest injects prompt only when missing, splices signed thinking only at matched tool id, filters installed tools', () => {
   const messages: ApiMessage[] = [
@@ -90,15 +100,33 @@ test('buildRequest injects prompt only when missing, splices signed thinking onl
   expect(built.messages[1]?.content).toEqual([signed, messages[1]?.content[0]])
   expect(built.messages[3]?.content).toEqual(messages[3]?.content)
   expect(messages[0]?.content).toHaveLength(1)
-  expect(built.tools.map(t => t.name)).toEqual(['Read', 'Glob', 'Bash'])
+  expect(built.tools.map(t => t.name)).toEqual(['Read', 'Glob', 'Bash', 'SubagentHandback'])
   expect(built.tools[0]).toEqual(TOOL_SCHEMAS.Read)
   expect(built.max_tokens).toBe(32000)
   expect(built.stream).toBe(true)
   expect(built.system.length > 0).toBe(true)
   expect(built.model).toBeUndefined()
   expect((buildRequest(agent({ mode: 'read' }), [{ role: 'user', content: [{ type: 'text', text: 'Delegated task' }] }],
-    ['Read', 'Bash', 'Glob']) as { messages: ApiMessage[]; tools: { name: string }[] }).tools.map(t => t.name)).toEqual(['Read', 'Glob'])
+    ['Read', 'Bash', 'Glob']) as { messages: ApiMessage[]; tools: { name: string }[] }).tools.map(t => t.name)).toEqual(['Read', 'Glob', 'SubagentHandback'])
   expect((buildRequest(a, [{ role: 'user', content: [{ type: 'text', text: 'Delegated task' }] }], ['Read']) as { messages: ApiMessage[] }).messages[0]?.content).toHaveLength(1)
+})
+
+test('buildRequest always appends the handback schema after installed tools in both modes', () => {
+  for (const mode of ['read', 'edit'] as const) {
+    for (const available of [[], ['Read', 'Bash'], ['Read', 'Bash', 'SubagentHandback']]) {
+      const built = buildRequest(agent({ mode, prompt: null }), [], available) as {
+        tools: { name: string; input_schema: { required: string[]; properties: { message: { minLength: number } }; additionalProperties: boolean } }[]
+      }
+      expect(built.tools.map(t => t.name)).toEqual([
+        ...available.includes('Read') ? ['Read'] : [],
+        ...mode === 'edit' && available.includes('Bash') ? ['Bash'] : [],
+        'SubagentHandback',
+      ])
+      expect(built.tools.at(-1)?.input_schema.required).toEqual(['message'])
+      expect(built.tools.at(-1)?.input_schema.properties.message.minLength).toBe(1)
+      expect(built.tools.at(-1)?.input_schema.additionalProperties).toBe(false)
+    }
+  }
 })
 
 test('proxy-style SSE fixture translates to exact chunks, complete result and signed thinking keyed by first tool id', () => {
@@ -128,6 +156,7 @@ test('text-only streamed step stores final and next step hands it back without a
       { type: 'message_start', message: { model: 'gpt-6-sol', usage: { input_tokens: 4 } } },
       { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
       { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Done' } },
+      { type: 'content_block_stop', index: 0 },
       { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 2 } },
       { type: 'message_stop' },
     ]).slice(0, 27) }
@@ -135,6 +164,7 @@ test('text-only streamed step stores final and next step hands it back without a
       { type: 'message_start', message: { model: 'gpt-6-sol', usage: { input_tokens: 4 } } },
       { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
       { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Done' } },
+      { type: 'content_block_stop', index: 0 },
       { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 2 } },
       { type: 'message_stop' },
     ]).slice(27) }
@@ -158,6 +188,12 @@ test('text-only streamed step stores final and next step hands it back without a
     { kind: 'stop', stopReason: 'tool_use', usage: null },
   ])
   expect(handback.result).toBeUndefined()
+  h.opts.check = { decision: 'ask' }
+  // SubagentHandback only accepts the engine's own verdict, so the approval hook leaves it alone.
+  const handbackTool = handback.chunks.find(chunk => chunk.kind === 'tool')
+  expect(handbackTool?.kind === 'tool' && handbackTool.name).toBe('SubagentHandback')
+  expect(await $.tool.check({ tool: 'SubagentHandback', input: {}, tool_use_id: handbackTool?.kind === 'tool' ? handbackTool.id : '' } as never))
+    .toEqual({ decision: 'ask' })
   expect(requests).toHaveLength(1)
   expect(registered(h)?.final).toBeNull()
   expect(h.calls.every(c => c.argv[1] !== 'step')).toBe(true)
@@ -182,6 +218,8 @@ test('tool step preserves signed thinking and split-line input, hands back only 
   await spawn($)
   const output = await collect(step($, 'a'))
   expect(output.chunks).toEqual(chunks)
+  h.opts.check = { decision: 'ask' }
+  await approvedTools($, output.chunks)
   expect(output.result).toBeUndefined()
   expect(registered(h)?.thinking).toEqual({ toolu_a: [{ type: 'thinking', thinking: 'reason', signature: 'signed' }] })
   expect(registered(h)?.final).toBeNull()
@@ -222,6 +260,74 @@ test('worker exit 7 with stderr, malformed stream and spawn failure fail closed 
   }
 })
 
+test('malformed typed NDJSON fails closed through streamed host chunks', async ($, on) => {
+  const h = harness(on, { status, jobs: [] })
+  nativeStub(on)
+  spawnStub(on)
+  on('tool.list', () => ({ value: [] }))
+  on('session.messages', () => ({ value: [{ role: 'user', content: [{ type: 'text', text: 'Delegated task' }] }] }))
+  let lines: object[] = []
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout', text: texts(lines) }
+    return { value: { code: 0, signal: null } }
+  })
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  const beginning = fixture.slice(0, 1)
+  const bad = [
+    [...beginning, { type: 'content_block_delta', delta: { type: 'text_delta', text: 'bad' } }],
+    [{ type: 'message_start', message: { model: 42 } }],
+    [...beginning, { type: 'content_block_start', index: 0, content_block: { type: 'text', text: 42 } }],
+    [...beginning, { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: 42 } }],
+    [...beginning, { type: 'content_block_start', index: 0, content_block: { type: 'other', text: '' } }],
+    [...beginning, { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'bad' } }],
+    [{ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }],
+    [...beginning, { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'bad' } }],
+    [...fixture, { type: 'ping' }],
+  ]
+  for (const [index, broken] of bad.entries()) {
+    lines = broken
+    await spawn($, `malformed-${index}`)
+    const output = await collect(step($, `malformed-${index}`))
+    expect(output.chunks.at(-1)?.kind).toBe('stop')
+    expect(output.chunks.some(c => c.kind === 'tool' || c.kind === 'input')).toBe(false)
+    const error = output.chunks.at(-2) as { kind: string; index: number; text: string }
+    expect(error.kind).toBe('text')
+    expect(error.text).toContain('claudex: ')
+    expect(registered(h, `malformed-${index}`)?.final).toBe(error.text)
+  }
+})
+
+test('late failures never publish buffered tool calls and put errors after emitted indexes', async ($, on) => {
+  const h = harness(on, { status, jobs: [] })
+  nativeStub(on)
+  spawnStub(on)
+  on('tool.list', () => ({ value: [] }))
+  on('session.messages', () => ({ value: [{ role: 'user', content: [{ type: 'text', text: 'Delegated task' }] }] }))
+  let lines: object[] = []
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout', text: texts(lines) }
+    yield { stream: 'stderr', text: 'late worker failure' }
+    return { value: { code: 7, signal: null } }
+  })
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  for (const [id, events, emitted, errorIndex] of [
+    ['tool-complete', fixture, ['thinking', 'text', 'text'], 2],
+    ['tool-partial', fixture.slice(0, 10), ['thinking', 'text', 'text'], 2],
+    ['text-only', [
+      { type: 'message_start', message: { model: 'gpt-6-sol' } },
+      { type: 'content_block_start', index: 4, content_block: { type: 'text', text: 'Hi' } },
+    ], ['text'], 5],
+  ] as const) {
+    lines = [...events]
+    await spawn($, id)
+    const output = await collect(step($, id))
+    expect(output.chunks.map(c => c.kind)).toEqual([...emitted, 'text', 'stop'])
+    expect(output.chunks.at(-2)).toMatchObject({ kind: 'text', index: errorIndex, text: 'claudex: late worker failure' })
+    expect(registered(h, id)?.final).toBe('claudex: late worker failure')
+  }
+})
+
 test('main and foreign agent pass through unchanged without accessing any engine capability', async ($, on) => {
   const h = harness(on, { status, jobs: [] })
   let nextCalls = 0
@@ -243,6 +349,72 @@ test('main and foreign agent pass through unchanged without accessing any engine
   expect(await collect(step($, 'foreign'))).toEqual({ chunks: [{ kind: 'text', index: 0, text: 'native' }, { kind: 'stop', stopReason: 'end_turn', usage: null }], result: undefined })
   expect(await collect(step($, 'foreign'))).toEqual({ chunks: [{ kind: 'text', index: 0, text: 'native' }, { kind: 'stop', stopReason: 'end_turn', usage: null }], result: undefined })
   expect(nextCalls).toBe(3)
+})
+
+test('unknown ownership after a failed lookup delegates, while identified claudex failures hand back', async ($, on) => {
+  const h = harness(on, { status, jobs: [], listed: [] })
+  nativeStub(on)
+  on('session.messages', () => { throw new Error('claudex messages unavailable') })
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  h.opts.listAgents = async () => { throw new Error('agent list unavailable') }
+  const unknown = await collect(step($, 'unknown-owner'))
+  expect(unknown.chunks[0]).toEqual({ kind: 'text', index: 0, text: 'native' })
+  h.opts.listAgents = async () => [{ id: 'found-gpt', type: 'claudex:gpt-sol', status: 'running', description: 'GPT' }]
+  const identified = await collect(step($, 'found-gpt'))
+  expect(identified.chunks.at(-2)?.kind).toBe('text')
+  expect((identified.chunks.at(-2) as { text: string }).text).toContain('claudex:')
+  expect(identified.chunks[0]).not.toEqual({ kind: 'text', index: 0, text: 'native' })
+  const handback = await collect(step($, 'found-gpt', 1))
+  expect(handback.chunks.map(c => c.kind)).toEqual(['tool', 'input', 'stop'])
+})
+
+test('stale lookup retries against current activation without losing known claudex ownership', async ($, on) => {
+  const s = { ...status, policy: { ...status.policy } }
+  const h = harness(on, { status: s, jobs: [] })
+  nativeStub(on)
+  on('session.messages', () => { throw new Error('identified claudex failure') })
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  let lookups = 0
+  h.opts.listAgents = async () => {
+    lookups++
+    if (lookups === 1) {
+      s.policy.CLAUDEX = 'off'
+      await $.command.run({ command: 'claudex', args: 'config CLAUDEX off', origin: { kind: 'composer' },
+        presentation: { isFullscreen: true, columns: 100 } })
+      return [{ id: 'stale-gpt', type: 'claudex:gpt-sol', status: 'running', description: 'GPT' }]
+    }
+    return []
+  }
+  const result = await collect(step($, 'stale-gpt'))
+  expect(lookups).toBe(2)
+  expect((result.chunks.at(-2) as { text: string }).text).toContain('claudex: no implementation for session.messages')
+  expect(result.chunks[0]).not.toEqual({ kind: 'text', index: 0, text: 'native' })
+})
+
+test('foreign and unknown steps propagate a downstream yield followed by the original error', async () => {
+  let hook: StreamHook<'turn.step'> | undefined
+  registerSteps(((name: string, callback: StreamHook<'turn.step'>) => {
+    if (name === 'turn.step') hook = callback
+  }) as On)
+  if (!hook) throw new Error('step hook not registered')
+  const error = new Error('native failure after yielding')
+  const chunk = { kind: 'text' as const, index: 7, text: 'native partial' }
+  const next = (() => (async function* () {
+    yield chunk
+    throw error
+  })()) as unknown as Parameters<StreamHook<'turn.step'>>[2]
+  for (const unknown of [false, true]) {
+    const engine = { agent: { list: async () => {
+      if (unknown) throw new Error('classification unavailable')
+      return [{ id: 'foreign-throws', type: 'general-purpose', status: 'running' }]
+    } } } as unknown as EngineInterface
+    const stream = hook(engine, { turnId: 't-native', index: 0, model: 'native', messageCount: 1,
+      agentId: unknown ? 'unknown-throws' : 'foreign-throws' }, next)
+    expect(await stream.next()).toEqual({ value: chunk, done: false })
+    let caught: unknown
+    try { await stream.next() } catch (failure) { caught = failure }
+    expect(caught).toBe(error)
+  }
 })
 
 test('direct step hook returns the unchanged next result for the main loop without touching $', async () => {

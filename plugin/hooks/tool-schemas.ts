@@ -226,3 +226,15 @@ export const TOOL_SCHEMAS: Record<string, { name: string; description: string; i
     }
   }
 }
+
+// Hand-written, not generated: the captured tool schemas omit the native subagent handback tool.
+export const HANDBACK_SCHEMA = {
+  name: 'SubagentHandback',
+  description: 'Deliver your complete final report to the agent that dispatched you. Call it exactly once, when the task is finished or cannot be finished; your work ends with it. The message must be the whole report, never empty.',
+  input_schema: {
+    type: 'object',
+    properties: { message: { type: 'string', minLength: 1, description: 'Your complete final report.' } },
+    required: ['message'],
+    additionalProperties: false,
+  },
+}

@@ -13,7 +13,7 @@
 
 enum { LUNA, SOL, ASTRA, TERRA, FAMILIES };
 static const char *const NAMES[] = { "luna", "sol", "astra", "terra" };
-static const char *const DEFAULTS[] = { "low", "high", "xhigh", "high" };
+static const char *const DEFAULTS[] = { "low", "high", "xhigh", "medium" };
 static const char *const FALLBACK[] = { "gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-sol" };
 static const char *const EFFORTS[] = { "low", "medium", "high", "xhigh", "max", "ultra" };
 
@@ -27,7 +27,7 @@ typedef struct {
     long loaded_at;
 } catalog_t;
 static catalog_t *catalog; /* immutable once installed; protected by catalog_lock */
-static char rejected_slugs[MAX_MODELS][MODEL_SLUG_MAX];
+static char rejected_slugs[MAX_MODELS + FAMILIES][MODEL_SLUG_MAX];
 static size_t rejected_count;
 static int fetch_failed;
 static pthread_mutex_t catalog_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -106,7 +106,7 @@ void models_mark_rejected(const char *slug) {
     pthread_mutex_lock(&catalog_lock);
     for (size_t i = 0; i < rejected_count; i++)
         if (!strcmp(slug, rejected_slugs[i])) { pthread_mutex_unlock(&catalog_lock); return; }
-    if (rejected_count < MAX_MODELS) {
+    if (rejected_count < MAX_MODELS + FAMILIES) {
         memcpy(rejected_slugs[rejected_count], slug, len + 1);
         rejected_count++;
     }
@@ -134,24 +134,17 @@ static void view_locked(models_view_t *out) {
         const row_t *b = best[r->family];
         if (!b || r->major > b->major || (r->major == b->major && r->minor > b->minor)) best[r->family] = r;
     }
-    int any_current = 0;
-    for (int i = LUNA; i <= ASTRA; i++)
-        if (best[i] && best[i]->major == newest) any_current = 1;
-    out->from_backend = c && !fetch_failed && any_current;
+    out->from_backend = c && !fetch_failed;
     out->loaded_at = c ? c->loaded_at : 0;
-    for (int i = LUNA; i <= ASTRA; i++) {
-        int rejected_family = 0;
-        for (size_t j = 0; c && j < c->count; j++)
-            if (c->rows[j].family == i && rejected(c->rows[j].slug)) rejected_family = 1;
-        out->current[i] = out->from_backend && best[i] &&
-            (best[i]->major == newest || rejected_family);
-        const char *sol = out->from_backend && best[SOL] ? best[SOL]->slug : FALLBACK[SOL];
-        const char *slug = out->current[i] ? best[i]->slug : sol;
-        if (out->from_backend && rejected_family && !best[i]) slug = FALLBACK[i];
-        if (!out->from_backend) slug = FALLBACK[i];
-        memcpy(out->family[i], slug, strlen(slug) + 1);
+    const char *sol = out->from_backend ? (best[SOL] ? best[SOL]->slug : NULL) :
+                      (rejected(FALLBACK[SOL]) ? NULL : FALLBACK[SOL]);
+    for (int i = LUNA; i < FAMILIES; i++) {
+        out->current[i] = out->from_backend ? (best[i] && best[i]->major == newest) :
+                          (i != TERRA && !rejected(FALLBACK[i]));
+        const char *slug = out->current[i] ?
+                           (out->from_backend ? best[i]->slug : FALLBACK[i]) : sol;
+        if (slug) memcpy(out->family[i], slug, strlen(slug) + 1);
     }
-    memcpy(out->family[TERRA], out->family[SOL], MODEL_SLUG_MAX);
 }
 
 void models_view(models_view_t *out) {
@@ -163,8 +156,8 @@ void models_view(models_view_t *out) {
 size_t models_list(char out[][MODEL_SLUG_MAX], size_t cap) {
     models_view_t v; models_view(&v);
     size_t n = 0;
-    for (int i = LUNA; i <= ASTRA; i++) {
-        if (v.from_backend && !v.current[i]) continue;
+    for (int i = LUNA; i < FAMILIES; i++) {
+        if (!v.current[i]) continue;
         if (n < cap && out) memcpy(out[n], v.family[i], MODEL_SLUG_MAX);
         n++;
     }
@@ -198,9 +191,11 @@ int model_resolve(const char *requested, const char *body_effort, model_sel_t *o
     }
     const char *effort = at ? effort_lookup(at + 1, n - name_len - 1) : NULL;
     if (at && !effort) return MODEL_E_BAD_EFFORT;
+    out->family = NAMES[family];
     if (!effort && !remapped && body_effort) effort = effort_lookup(body_effort, strlen(body_effort));
     models_view_t v; models_view(&v);
-    int resolved_family = (family == TERRA || (v.from_backend && !v.current[family])) ? SOL : family;
+    if (!v.family[family][0]) return MODEL_E_UNAVAILABLE;
+    int resolved_family = v.current[family] ? family : SOL;
     if (!effort) effort = DEFAULTS[resolved_family];
     if (resolved_family == LUNA && !strcmp(effort, "ultra")) effort = "max";
     memcpy(out->slug, v.family[family], MODEL_SLUG_MAX);

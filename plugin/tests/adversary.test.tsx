@@ -9,7 +9,7 @@ const SESSION = '12345678-1234-4234-8234-123456789abc'
 const status = (enabled = true): ClaudexStatus => ({
   policy: { CLAUDEX: enabled ? 'on' : 'off', CLAUDEX_ADVERSARY_MODEL: 'gpt-6-astra@xhigh' },
   policy_sources: { CLAUDEX: 'default' }, proxy: { up: false, ours: false, port: 18765 },
-  token_hours_left: null, plan: null,
+  token_hours_left: null, plan: null, models: null, deprecations: [],
 })
 const finding = (id: string, severity: ClaudexFinding['severity'] = 'high'): ClaudexFinding => ({
   id, severity, title: `Title ${id}`, mechanism: `Mechanism ${id}`,

@@ -188,7 +188,7 @@ static void handle_messages(int fd, const server_cfg_t *cfg, const char *body, s
     int rc = translate_request(body, len, &xr, err, sizeof err);
     if (rc != 0) {
         send_error(fd, -rc, err, NULL);
-        log_line("id=%lu status=%d reason=bad_request", rid, -rc);
+        log_line("id=%lu status=%d reason=%s", rid, -rc, rc == -529 ? "unavailable_model" : "bad_request");
         return;
     }
 
@@ -294,9 +294,9 @@ static void handle_messages(int fd, const server_cfg_t *cfg, const char *body, s
 static void handle_models(int fd) {
     buf_t b; buf_init(&b);
     buf_append_str(&b, "{\"data\":[");
-    char slugs[3][MODEL_SLUG_MAX];
-    size_t count = models_list(slugs, 3);
-    for (size_t i = 0; i < count && i < 3; i++)
+    char slugs[4][MODEL_SLUG_MAX];
+    size_t count = models_list(slugs, 4);
+    for (size_t i = 0; i < count && i < 4; i++)
         buf_appendf(&b, "%s{\"type\":\"model\",\"id\":\"%s\",\"display_name\":\"%s\",\"created_at\":\"2026-01-01T00:00:00Z\"}",
                     i ? "," : "", slugs[i], slugs[i]);
     buf_append_str(&b, "],\"has_more\":false}");

@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # claudex-worker — run a GPT model as a headless Claude Code worker through claudex-proxy.
 #
 # The main Claude Code session is never touched: no env, no proxy, no settings. Each
@@ -118,7 +118,7 @@ cmd_policy_line() {
 
 tier_slug() {
     case "$1" in
-        luna) echo gpt-luna ;; terra|sol) echo gpt-sol ;;
+        luna) echo gpt-luna ;; sol) echo gpt-sol ;; terra) echo gpt-terra ;;
         astra) echo gpt-astra ;;
         *) return 1 ;;
     esac
@@ -330,7 +330,6 @@ check_worker_tier() {
     [[ "${CFG[CLAUDEX]}" == on ]] || die 3 "claudex is disabled (CLAUDEX=off); not using GPT"
     if [[ "$WORK_TIER" == adversary ]]; then
         WORK_SLUG="${CFG[CLAUDEX_ADVERSARY_MODEL]%@*}"
-        [[ "$WORK_SLUG" != *-terra ]] || WORK_SLUG=gpt-sol
         [[ -n "$WORK_EFFORT" ]] || { [[ "${CFG[CLAUDEX_ADVERSARY_MODEL]}" == *@* ]] && WORK_EFFORT="${CFG[CLAUDEX_ADVERSARY_MODEL]#*@}"; }
         [[ -z "$WORK_MODE" || "$WORK_MODE" == read ]] || die 2 "the adversary is always read-only"
         WORK_MODE=read
@@ -362,8 +361,13 @@ preflight() {
     done
     [[ -z "$WORK_RESUME" || "$WORK_RESUME" =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]] || die 2 "invalid session id"
     check_worker_tier "$WORK_TIER"
-    [[ -n "$WORK_EFFORT" ]] || WORK_EFFORT=$(tier_default_effort "$WORK_GATE")
-    [[ "$WORK_EFFORT" =~ ^(low|medium|high|xhigh|max|ultra)$ ]] || die 2 "invalid effort '$WORK_EFFORT'"
+    if [[ -z "$WORK_EFFORT" && "$WORK_SLUG" == gpt-terra ]]; then
+        WORK_MODEL=$WORK_SLUG # the proxy chooses sol or a current terra's default effort
+    else
+        [[ -n "$WORK_EFFORT" ]] || WORK_EFFORT=$(tier_default_effort "$WORK_GATE")
+        [[ "$WORK_EFFORT" =~ ^(low|medium|high|xhigh|max|ultra)$ ]] || die 2 "invalid effort '$WORK_EFFORT'"
+        WORK_MODEL="$WORK_SLUG@$WORK_EFFORT"
+    fi
     [[ -n "$WORK_MODE" ]] || WORK_MODE="${CFG[CLAUDEX_WORKER_MODE]}"
     [[ "$WORK_MAX_TURNS" =~ ^[0-9]+$ ]] || die 2 "invalid --max-turns"
     [[ -d "$WORK_CWD" ]] || die 2 "no such directory: $WORK_CWD"
@@ -373,7 +377,6 @@ preflight() {
     WORK_CWD=$(cd "$WORK_CWD" && pwd -P)
     WORK_BRIEF=$(cat)
     [[ -n "${WORK_BRIEF//[[:space:]]/}" ]] || die 2 "empty brief on stdin"
-    WORK_MODEL="$WORK_SLUG@$WORK_EFFORT"
 }
 
 signal_worker() {
@@ -999,6 +1002,81 @@ step_cancel() {
     exit "$1"
 }
 
+cmd_resolve() {
+    [[ $# -eq 3 && "$1" == --cwd ]] || die 2 "usage: claudex-worker resolve --cwd DIR PATH"
+    local dir=$2 path=$3 resolved
+    [[ "$dir" == /* && -d "$dir" ]] || die 2 "resolve --cwd must be an absolute existing directory"
+    dir=$(realpath -e -- "$dir") || die 2 "cannot resolve directory"
+    [[ "$path" == /* ]] || path="$dir/$path"
+    resolved=$(realpath -m -- "$path") || die 2 "cannot resolve path"
+    [[ "$dir" == / || "$resolved" == "$dir" || "$resolved" == "$dir/"* ]] && return 0
+    printf 'claudex: PATH resolves outside DIR\n' >&2
+    return 3
+}
+
+cmd_sandbox() {
+    local dir='' command='' path=/usr/bin:/bin home caller bwrap='' toolchain
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --cwd)
+                [[ $# -ge 2 && -n "$2" ]] || die 2 "missing value for --cwd"
+                dir=$2; shift 2 ;;
+            --path)
+                [[ $# -ge 2 ]] || die 2 "missing value for --path"
+                path=$2; shift 2 ;;
+            -c)
+                [[ $# -ge 2 ]] || die 2 "missing value for -c"
+                command=$2; shift 2 ;;
+            *) die 2 "unknown option: $1" ;;
+        esac
+    done
+    [[ "$dir" == /* && -d "$dir" ]] || die 2 "sandbox --cwd must be an absolute existing directory"
+    [[ -n "$command" ]] || die 2 "sandbox requires a non-empty command"
+    dir=$(realpath -e -- "$dir") || die 2 "cannot resolve sandbox directory"
+    [[ "$HOME" == /* ]] || die 2 "sandbox requires an absolute HOME"
+    home=$(realpath -m -- "$HOME") || die 2 "cannot resolve HOME"
+    [[ "$dir" != / && "$home" != "$dir" && "$home" != "$dir/"* ]] || die 2 "sandbox refuses / or an ancestor of HOME"
+    caller=$(pwd -P) || die 2 "cannot resolve caller directory"
+    [[ "$caller" == "$dir" || "$caller" == "$dir/"* ]] || caller=$dir
+    if [[ -n "${CLAUDEX_BWRAP+x}" ]]; then
+        bwrap=$CLAUDEX_BWRAP
+    else
+        for bwrap in /usr/bin/bwrap /bin/bwrap; do
+            [[ ! -x "$bwrap" ]] || break
+        done
+    fi
+    [[ "$bwrap" == /* && -x "$bwrap" ]] || die 126 "bwrap not found; refusing to run unsandboxed"
+
+    local -a args=(--ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --tmpfs /run)
+    [[ ! -d /var/run || -L /var/run ]] || args+=(--tmpfs /var/run)
+    args+=(--tmpfs "$home" --setenv PATH "$path")
+    for toolchain in .local/bin .local/lib .cargo .rustup go .cache .npm; do
+        [[ ! -d "$home/$toolchain" ]] || args+=(--ro-bind "$home/$toolchain" "$home/$toolchain")
+    done
+    # The hidden home is read-only, so a write outside DIR fails loudly instead of landing on a discarded tmpfs.
+    args+=(--bind "$dir" "$dir" --remount-ro "$home" --unshare-all --die-with-parent --new-session --chdir "$caller")
+
+    # bwrap setup errors and a command's exit 1 otherwise look identical. Its status
+    # fd distinguishes them; unlink the backing file before exposing the directory.
+    local status_file status_read status_write line rc=0 started=false exited=false
+    status_file=$(mktemp "${TMPDIR:-/tmp}/claudex-sandbox-status.XXXXXX") || die 126 "cannot create sandbox status; refusing to run unsandboxed"
+    [[ -n "$status_file" && -f "$status_file" ]] || die 126 "missing sandbox status file; refusing to run unsandboxed"
+    if ! exec {status_read}< "$status_file" {status_write}> "$status_file"; then
+        rm -f -- "$status_file"
+        die 126 "cannot open sandbox status; refusing to run unsandboxed"
+    fi
+    rm -f -- "$status_file" || die 126 "cannot unlink sandbox status; refusing to run unsandboxed"
+    "$bwrap" "${args[@]}" --json-status-fd "$status_write" -- /bin/bash -c "$command" || rc=$?
+    exec {status_write}>&-
+    while IFS= read -r line <&"$status_read"; do
+        [[ ! "$line" =~ \"child-pid\"[[:space:]]*:[[:space:]]*[0-9]+ ]] || started=true
+        [[ ! "$line" =~ \"exit-code\"[[:space:]]*:[[:space:]]*[0-9]+ ]] || exited=true
+    done
+    exec {status_read}<&-
+    [[ "$started" == true && "$exited" == true ]] || die 126 "bwrap could not start; refusing to run unsandboxed"
+    return "$rc"
+}
+
 cmd_step() {
     [[ $# -ge 1 ]] || die 2 "usage: claudex-worker step TIER [--effort E] < request.json"
     WORK_EFFORT='' WORK_MODE=''
@@ -1203,6 +1281,8 @@ claudex-worker $VERSION
   start TIER [same options] < brief               supervised background job
   step TIER [--effort E] < request.json           stream proxy SSE as NDJSON
   admit TIER --running N                          check agent/worker capacity
+  sandbox --cwd DIR [--path PATHVALUE] -c COMMAND  confined Bash, no network
+  resolve --cwd DIR PATH                          check resolved path stays inside DIR
   jobs [--json] [--limit N] [--id JOB]... [--owner OWNER] | cancel JOB | findings JOB
   wait JOB [--timeout S] | result JOB
   config | set KEY VALUE | policy-line | status [--json] | stop-proxy
@@ -1226,13 +1306,15 @@ main() {
         exec {WORK_OUTPUT_FD}>&1 {WORK_ERROR_FD}>&2
         exec >> "$WORK_OUT_TMP" 2>> "$WORK_ERR_TMP"
     fi
-    load_policy
+    [[ "$cmd" == sandbox || "$cmd" == resolve ]] || load_policy
     case "$cmd" in
         run)         cmd_run "$@" ;;
         resume)      cmd_resume "$@" ;;
         start)       cmd_start "$@" ;;
         step)        cmd_step "$@" ;;
         admit)       cmd_admit "$@" ;;
+        sandbox)     cmd_sandbox "$@" ;;
+        resolve)     cmd_resolve "$@" ;;
         jobs)        cmd_jobs "$@" ;;
         cancel)      cmd_cancel "$@" ;;
         findings)    cmd_findings "$@" ;;

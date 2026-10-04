@@ -39,6 +39,7 @@ worker-test: $(BUILD)/claudex-proxy-test
 	@echo "== worker policy"; bash tests/worker/policy_test.sh
 	@echo "== worker jobs"; bash tests/worker/jobs_test.sh
 	@echo "== worker step and admission"; bash tests/worker/step_test.sh
+	@echo "== worker sandbox"; bash tests/worker/sandbox_test.sh
 	@echo "== worker proxy management"; bash tests/worker/proxy_test.sh
 
 service-test:

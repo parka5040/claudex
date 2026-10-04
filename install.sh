@@ -104,7 +104,7 @@ install_local() {
 
     printf '\n%s\n%s\n%s\n%s\n%s\n' \
         'claudex is installed. Check it with:  claudex-worker status' \
-        'Then start a new Claude Code session and ask for a GPT worker, e.g. "have terra write the tests".' \
+        'Then start a new Claude Code session and ask for a GPT worker, e.g. "have sol write the tests".' \
         "Uninstall with:                       $kit/install.sh --uninstall" \
         'Permission rules still worth adding to ~/.claude/settings.json permissions.allow:' \
         '  Bash(claudex-worker *), mcp__claudex__review, mcp__claudex__verdict'
@@ -195,7 +195,8 @@ bootstrap() {
         fi
     fi
 
-    bootstrap_tmp="$(mktemp -d -t claudex-install.XXXXXXXX </dev/null)"
+    bootstrap_tmp="$(mktemp -d "${TMPDIR:-/tmp}/claudex-install.XXXXXXXX" </dev/null)" || die "cannot create bootstrap directory"
+    [[ -n $bootstrap_tmp && -d $bootstrap_tmp ]] || die "cannot create bootstrap directory"
     trap cleanup_bootstrap EXIT
     local archive="$bootstrap_tmp/source.tar.gz"
     curl -fsSL --proto "$proto" --tlsv1.2 "$github/archive/$ref.tar.gz" -o "$archive" </dev/null

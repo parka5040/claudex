@@ -259,9 +259,71 @@ A `tool.call` hook matched to `Read`, `Write`, `Edit`, `Grep`, `Glob` passes thr
 unless `e.agentId` is a claudex agent. For a claudex agent, it resolves the call's path argument
 (`file_path`, or `path` for Grep/Glob, defaulting to the agent's cwd) against the agent's cwd
 lexically (`.`/`..` collapsed, no filesystem access) and answers `{ deny: 'claudex: <tool> outside
-<cwd> refused' }` when it falls outside. This is a best-effort rule on top of the session's own
-permissions and sandbox, which still apply in full (Bash is governed by them alone, exactly as for
-a native subagent); the docs say so.
+<cwd> refused' }` when it falls outside. It is lexical (a symlink inside the directory can
+point out); the docs say so.
+
+### Permissions and sandbox: "yolo, but sandboxed" (revised 2026-10-04)
+
+Found live after the build: in an auto-mode session every GPT agent write was refused ("the
+server-side auto mode classifier gave no verdict"), because the auto-mode classifier's verdict
+rides on Anthropic's response to the request that produced the action, and a GPT step makes no
+such request. Decided with the user: GPT agents run without permission prompts, confined by
+claudex instead.
+
+- **Approval.** `turn.step` records the `tool_use` id of every tool call it yields for a claudex
+  agent (including the synthesized `SubagentHandback`), in a module-level set capped at the 2000
+  most recent ids. A `tool.check` hook answers for exactly those ids: it calls `next(e)` first;
+  only a core `ask` becomes `{ decision: 'allow', reason: 'claudex: GPT agent call, confined by
+  claudex' }`; core `allow` and `deny` stand unchanged. `SubagentHandback` is never touched because
+  the engine accepts only its own verdict for it. Every other check returns
+  `next(e)` unchanged with no `$` call. The agents keep the session's permission mode; no
+  `bypassPermissions`.
+- **Files.** The path rule above.
+- **Bash.** A `tool.call` hook matched to `Bash`, for a claudex agent's call, rewrites
+  `command` to `'<root>/bin/claudex-worker' sandbox --cwd '<agent cwd>' -c '<original
+  command>'` (POSIX single-quote escaping, built in `worker.ts`), all other fields unchanged. A
+  read-mode agent's Bash call is denied (it has no Bash tool anyway). Unknown agents follow the F6
+  classification; main-loop and foreign calls reach `next` unchanged, the main loop with no `$`
+  call. The agent view shows the wrapper around the command; the docs say so.
+- **`claudex-worker sandbox --cwd DIR -c COMMAND`** runs `bash -c COMMAND` under `bwrap`
+  (`CLAUDEX_BWRAP` overrides the path, for tests): `--ro-bind / /`, `--dev /dev`, `--proc /proc`,
+  `--tmpfs /tmp`, `--tmpfs $HOME`, then read-only binds of the toolchain directories that exist
+  (`~/.local/bin`, `~/.local/lib`, `~/.cargo`, `~/.rustup`, `~/go`, `~/.cache`, `~/.npm`), then
+  `--bind DIR DIR`, `--unshare-all` (no network), `--die-with-parent`, `--new-session`,
+  `--chdir` = the caller's `$PWD` when it is inside DIR, else DIR. Exit status is the command's.
+  It refuses (exit 2) a DIR that is not an absolute existing directory, or is `/` or any ancestor of
+  `$HOME` (binding it would re-expose the hidden home); refuses an empty COMMAND; and fails closed (exit 126, "refusing to run unsandboxed",
+  the command never runs) when `bwrap` is missing or cannot start. This is the confinement the
+  headless edit workers had (writes confined to the directory, no network, `$HOME` unreadable
+  except the directory and toolchains).
+
+**Round-2 hardening** (adversarial review round 2; decisions by the user marked *):
+- **No host IPC** (F1*): the sandbox also mounts an empty `--tmpfs /run` (and `/var/run` when it is
+  a real directory), removing the D-Bus, compositor, docker and agent sockets. Abstract sockets
+  are cut by the network namespace. Residual, documented: pathname sockets inside DIR or the
+  read-only toolchain directories.
+- **Symlink bridge** (F2*): before a claudex agent's Read/Write/Edit/Grep/Glob runs, after the
+  lexical rule, the mod runs `claudex-worker resolve --cwd DIR PATH` (exit 0 when `realpath -m`
+  of PATH lies inside `realpath -e` of DIR, exit 3 otherwise) and denies on non-zero. Glob
+  patterns that are absolute or contain a `..` segment are denied. GPT agents may not use
+  background Bash (`run_in_background: true` is denied), so no command runs concurrently with
+  a file tool (the engine already runs Edit, Write and Bash serially).
+- **Deny rules see the real command** (F3): before rewriting, the Bash hook asks
+  `$.tool.check({ tool: 'Bash', input: <original input> })`; a deny ends the call.
+- **Trusted launch** (F4): the rewrite is `/usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin
+  /bin/bash '<root>/bin/claudex-worker' sandbox --cwd '<cwd>' --path "$PATH" -c '<command>'`;
+  `sandbox` finds `bwrap` only in `/usr/bin` or `/bin` (`CLAUDEX_BWRAP` for tests), and
+  `--path` becomes `PATH` inside the sandbox only.
+- **Spawn metadata** (F5): admission is serialized, so the in-flight spawn's tier, cwd, prompt
+  and mode are held as "pending" and bound to a claudex agent the step hook discovers while the
+  spawn has not returned. An agent discovered with no metadata has `cwd: null`, and every tool
+  call of it is denied.
+- **Fail closed on hook failure** (F6): the spawn hook, the five path-rule hooks and the Bash
+  hook have `.catch` handlers that deny (pass-through for calls without an agentId); the wait for
+  a previous admission is bounded at 5 s, then denied with "another GPT agent spawn is in
+  progress; retry".
+- F7–F10: native steps pass through outside claudex's error handler; tests touch only
+  directories they own and signal only children listed by `jobs -pr`.
 
 ### What is removed
 
@@ -277,9 +339,10 @@ claudex agents from `$.agent.list()`.
 - **F1 hooks** (the footprint test's expected list): `session.start`;
   `tool.call{tool=mcp__claudex__review}`, `tool.call{tool=mcp__claudex__verdict}`;
   `tool.call{tool=Read|Write|Edit|Grep|Glob}` (the path rule; pass-through for every other
-  caller); `command.run{command=claudex}`; the two panes' `ui.render`; `turn.step` (pass-through
-  as specified); `agent.spawn{subagentType=claudex:gpt-*}`; `agent.offer{agent=claudex:gpt-*}`.
-  Still no `prompt.compose`, no `tool.check` hook.
+  caller); `tool.call{tool=Bash}` (the sandbox rewrite); `tool.check` (approval of recorded GPT
+  call ids only); `command.run{command=claudex}`; the two panes' `ui.render`; `turn.step`
+  (pass-through as specified); `agent.spawn{subagentType=claudex:gpt-*}`;
+  `agent.offer{agent=claudex:gpt-*}`. Still no `prompt.compose`.
 - **F1 capabilities**, added: `$.agent.register`, `$.agent.list`, `$.session.messages`,
   `$.process.spawn`. Still never `$.fs`, `$.http`, `$.settings`, `$.session.append`, `$.model.*`,
   `$.env`.

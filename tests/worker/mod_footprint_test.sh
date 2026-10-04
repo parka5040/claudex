@@ -27,6 +27,8 @@ check_footprint() {
         'tool.call{tool=Edit}' \
         'tool.call{tool=/"^Grep$"/}' \
         'tool.call{tool=/"^Glob$"/}' \
+        'tool.call{tool=Bash}' \
+        'tool.check' \
         'command.run{command=claudex}' \
         'ui.render{component=Pane,requestId=claudex-workers}' \
         'ui.render{component=Pane,requestId=claudex-findings}' \
@@ -107,4 +109,4 @@ if [[ ${1:-} == --self-test ]]; then
 fi
 
 check_footprint "$output" || { printf '%s\n' "$output" >&2; exit 1; }
-printf 'mod footprint: exact 14 hooks; capability allow-list satisfied; launch gates covered by plugin tests\n'
+printf 'mod footprint: exact 16 hooks; capability allow-list satisfied; launch gates covered by plugin tests\n'

@@ -1,6 +1,7 @@
 import type { Register } from 'claude-code'
 import { registerReviewTools } from './adversary.tsx'
 import { registerAgents } from './agents.ts'
+import { registerApproval } from './approve.ts'
 import { registerCommands } from './commands.ts'
 import { registerConfinement } from './confine.ts'
 import { registerDelivery } from './delivery.ts'
@@ -15,6 +16,7 @@ export const register: Register = on => {
   registerDelivery(on)
   registerAgents(on)
   registerSteps(on)
+  registerApproval(on)
   registerConfinement(on)
   registerReviewTools(on)
 }

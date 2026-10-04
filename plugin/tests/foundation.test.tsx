@@ -19,6 +19,7 @@ const status = (): ClaudexStatus => ({
   },
   proxy: { up: false, ours: false, port: 18765 },
   token_hours_left: 120, plan: { used_pct: 34, limit: 'weekly', age_s: 8 },
+  models: null, deprecations: [],
 })
 const job = (id: string, state: ClaudexJob['state'] = 'running'): ClaudexJob => ({
   id, tier: 'sol', kind: 'worker', model: 'gpt-6-sol@high', mode: 'edit',
@@ -147,6 +148,23 @@ test('cold off registers only command; config on/off re-arms and effective chang
   await command($, 'config CLAUDEX on')
   await h.clock.advance(2000)
   expect(h.calls.filter(c => c.argv[1] === 'jobs' && c.argv.includes('--limit'))).toHaveLength(4)
+})
+
+test('status shows resolved models and deprecation notes from worker status JSON', async ($, on) => {
+  const s = status()
+  s.models = { luna: 'gpt-6-luna', sol: 'gpt-6.1-sol', astra: 'gpt-6-astra',
+    terra: 'gpt-6.1-sol', source: 'backend', fetched_age_s: 28 }
+  s.deprecations = ['terra is deprecated (served by sol)']
+  harness(on, { status: s, jobs: [] })
+  await start($)
+  const response = await command($, 'status')
+  expect(response.text).toContain('Models: luna=gpt-6-luna sol=gpt-6.1-sol astra=gpt-6-astra (backend)')
+  expect(response.text).toContain('terra is deprecated (served by sol)')
+  s.models = null
+  s.deprecations = []
+  const missing = await command($, 'status')
+  expect(missing.text).not.toContain('Models:')
+  expect(missing.text).not.toContain('terra is deprecated')
 })
 
 test('config shows policy sources, writes argv, distinguishes env shadowing, and rejects unknown', async ($, on) => {

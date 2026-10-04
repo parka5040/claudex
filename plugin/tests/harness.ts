@@ -28,6 +28,7 @@ export type Options = {
   status: ClaudexStatus
   jobs: ClaudexJob[]
   listed?: AgentInfo[]
+  listAgents?: () => Promise<AgentInfo[]>
   sessionId?: string
   route?: (call: Call, clock: MockClock) => StubRun | Promise<StubRun>
   drop?: string
@@ -87,7 +88,7 @@ export function harness(on: On, opts: Options): Harness {
   on('store.keys', () => ({ value: [...stored.keys()] }))
   on('tool.register', ($, e) => { tools.push(e.name); return { value: { tool: `mcp__claudex__${e.name}` } } })
   on('agent.register', ($, e) => { agents.push(e); return { value: { agent: `claudex:${e.name}` } } })
-  on('agent.list', () => ({ value: listed }))
+  on('agent.list', async () => ({ value: opts.listAgents ? await opts.listAgents() : listed }))
   on('tool.check', ($, e) => { checks.push({ tool: e.tool, input: e.input }); return opts.check ?? { decision: 'allow' } })
   on('command.register', ($, e) => { commands.push(e.name); return { value: { command: e.name } } })
   on('ui.status', ($, e) => { statuses.push(e.text); return { value: undefined } })

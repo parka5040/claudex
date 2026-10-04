@@ -8,6 +8,7 @@ const SECOND = '1790000001-abcdef12'
 const status = (enabled = true): ClaudexStatus => ({
   policy: { CLAUDEX: enabled ? 'on' : 'off' }, policy_sources: { CLAUDEX: 'file' },
   proxy: { up: false, ours: false, port: 18765 }, token_hours_left: null, plan: null,
+  models: null, deprecations: [],
 })
 const job = (id = ID, state: ClaudexJob['state'] = 'done'): ClaudexJob => ({
   id, tier: 'sol', kind: 'worker', model: 'gpt-6-sol@high', mode: 'read', cwd: '/repo',

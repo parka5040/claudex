@@ -1,6 +1,6 @@
 // Keep the published state contract self-contained; it mirrors hooks/agents.ts.
 export type ClaudexAgent = {
-  tier: 'luna' | 'sol' | 'astra'; cwd: string; prompt: string | null; mode: 'read' | 'edit'; model: string
+  tier: 'luna' | 'sol' | 'astra'; cwd: string | null; prompt: string | null; mode: 'read' | 'edit'; model: string
   final: string | null
   thinking: Record<string, { type: 'thinking'; thinking: string; signature: string }[]>
 }
@@ -18,6 +18,9 @@ export type ClaudexStatus = {
   proxy: { up: boolean; ours: boolean; port: number }
   token_hours_left: number | null
   plan: { used_pct: number; limit: string; age_s: number } | null
+  models: { luna: string; sol: string; astra: string; terra: string
+    source: 'backend' | 'fallback'; fetched_age_s: number } | null
+  deprecations: string[]
 }
 export type ClaudexDelivery = 'pending' | 'waiting' | 'claimed' | 'notified' | 'dropped' | 'delivered'
 export type ClaudexOwned = {

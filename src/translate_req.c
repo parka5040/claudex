@@ -385,14 +385,16 @@ int translate_request(const char *json, size_t len, xlate_req_t *out, char *err,
     int mrc = model_resolve(model, body_effort, &out->sel);
     if (mrc == MODEL_E_UNKNOWN) {
         buf_t names; buf_init(&names);
-        char slugs[3][MODEL_SLUG_MAX];
-        size_t count = models_list(slugs, 3);
-        for (size_t i = 0; i < count && i < 3; i++)
+        char slugs[4][MODEL_SLUG_MAX];
+        size_t count = models_list(slugs, 4);
+        for (size_t i = 0; i < count && i < 4; i++)
             buf_appendf(&names, "%s%s", names.len ? ", " : "", slugs[i]);
         rc = fail(err, errlen, 404, "model: %.80s is not a claudex tier (available: %s)", model, names.data ? names.data : "");
         buf_free(&names);
     } else if (mrc == MODEL_E_BAD_EFFORT) {
         rc = fail(err, errlen, 400, "model: %.80s has an invalid @effort suffix (use low, medium, high, xhigh, max or ultra)", model);
+    } else if (mrc == MODEL_E_UNAVAILABLE) {
+        rc = fail(err, errlen, 529, "no usable %s model; retry after the model list refreshes", out->sel.family);
     }
     if (rc) { yyjson_doc_free(src); return rc; }
 

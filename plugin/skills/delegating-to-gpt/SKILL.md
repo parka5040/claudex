@@ -55,12 +55,15 @@ separate read-only review using `CLAUDEX_ADVERSARY_MODEL` (default `gpt-astra@xh
 
 ## Facts about agents you cannot infer
 
-- Native GPT agents use the main session's permissions and sandbox, including for Bash. The mod
-  checks Read, Write, Edit, Grep and Glob paths lexically against the agent's working directory;
-  this best-effort rule is **not** a filesystem or symlink boundary. Bash is governed by the
-  session's own permissions and sandbox, not by that file-path check. Do not promise that an
-  agent cannot read other files or reach the network. Agent modes are `read` or `edit`; there is
-  no per-agent `yolo`.
+- Native GPT agents run without permission prompts, confined by claudex; explicit deny rules
+  and plan-mode denials still apply. Auto mode cannot judge GPT calls because GPT steps have no
+  Anthropic response carrying its classifier verdict. Read, Write, Edit, Grep and Glob are
+  confined lexically to the agent's working directory; this best-effort rule is **not** a
+  symlink boundary. Bash runs under bubblewrap with writes confined to that directory and
+  private temporary storage, **no network**, and home hidden except for that directory and
+  read-only toolchain/cache directories. Bash rows show the `claudex-worker sandbox` wrapper;
+  unavailable sandboxing refuses the command. Agent modes are `read` (no Bash) or `edit`;
+  there is no per-agent `yolo`.
 - GPT usage counts against the user's ChatGPT plan. A 401 means the Codex login lapsed: tell
   the user to run `codex exec 'ok'`. Do not retry in a loop.
 - **An agent's report is a claim.** Agents can report blocked or sandboxed operations as
@@ -84,7 +87,8 @@ The brief is read from stdin. Use Bash `run_in_background: true` for non-trivial
 `start`/`wait` when a Bash call may exceed 10 minutes. Headless `edit` workers use Claude
 Code's child sandbox (writes limited to their working directory, Bash network blocked); `read`
 workers cannot edit. A headless worker's explicit `--mode yolo` has no confinement and requires
-the user's explicit request. None of these headless restrictions describes a native GPT agent.
+the user's explicit request. Native GPT agents use the claudex confinement described above,
+not these child permission settings.
 
 ## Adversarial review
 

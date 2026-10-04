@@ -3,7 +3,11 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export SPIKEA_ROOT="$ROOT"
-export SPIKEA_DIR="${SPIKEA_DIR:-$(mktemp -d /tmp/claudex-spike-a-XXXXXXXX)}"
+if [[ -z "${SPIKEA_DIR:-}" ]]; then
+  SPIKEA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/claudex-spike-a-XXXXXXXX")" || { printf 'FAIL: cannot create spike directory\n' >&2; exit 1; }
+fi
+[[ -n "$SPIKEA_DIR" && -d "$SPIKEA_DIR" ]] || { printf 'FAIL: spike directory is missing\n' >&2; exit 1; }
+export SPIKEA_DIR
 mkdir -p "$ROOT/captures"
 if [[ ! -f "$SPIKEA_DIR/sample.txt" ]]; then printf 'before: original\n' > "$SPIKEA_DIR/sample.txt"; fi
 case "${1:-}" in
@@ -57,9 +61,12 @@ a)
   printf '\nFile after run: '; python3 -c 'import os;print(open(os.environ["SPIKEA_DIR"]+"/sample.txt").read().strip())'
   ;;
 ui-a)
-  python3 -m venv /tmp/claudex-spike-a-venv
-  /tmp/claudex-spike-a-venv/bin/python -m pip -q install pyte
-  SPIKEA_UI=1 SPIKEA_ROOT="$ROOT" /tmp/claudex-spike-a-venv/bin/python - <<'PY'
+  SPIKEA_VENV="$(mktemp -d "${TMPDIR:-/tmp}/claudex-spike-a-venv-XXXXXXXX")" || { printf 'FAIL: cannot create spike venv directory\n' >&2; exit 1; }
+  [[ -n "$SPIKEA_VENV" && -d "$SPIKEA_VENV" ]] || { printf 'FAIL: spike venv directory is missing\n' >&2; exit 1; }
+  trap '[[ -z "${SPIKEA_VENV:-}" || ! -d "$SPIKEA_VENV" ]] || rm -rf "$SPIKEA_VENV"' EXIT
+  python3 -m venv "$SPIKEA_VENV"
+  "$SPIKEA_VENV/bin/python" -m pip -q install pyte
+  SPIKEA_UI=1 SPIKEA_ROOT="$ROOT" "$SPIKEA_VENV/bin/python" - <<'PY'
 import os, pty, select, signal, struct, subprocess, termios, time
 from pathlib import Path
 import fcntl, pyte

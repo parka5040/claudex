@@ -57,6 +57,8 @@ async function showStatus($: EngineInterface) {
     ...keys.map(key => policyLine(status, key)),
     `Proxy: ${status.proxy.up ? status.proxy.ours ? 'running' : 'port taken' : 'stopped'} (${status.proxy.port})`,
     `Plan: ${status.plan ? `${status.plan.used_pct}% (${status.plan.limit}, ${status.plan.age_s}s old)` : 'unknown'}`,
+    ...(status.models ? [`Models: luna=${status.models.luna} sol=${status.models.sol} astra=${status.models.astra} (${status.models.source})`] : []),
+    ...status.deprecations,
     'Recent jobs:',
     ...jobs.slice(0, 5).map(job => `${job.id}  ${job.tier ?? '?'}  ${job.model ?? '?'}  ${job.state}`),
   ].join('\n') }

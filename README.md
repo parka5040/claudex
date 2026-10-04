@@ -26,8 +26,9 @@ headless `claude -p` children. `claudex:relay-*` couriers still use the headless
 for Workflow scripts and sessions where Claude Mods are off.
 
 - **Main session untouched.** No `ANTHROPIC_*` variables or model remapping in the main
-  session. Optional permissions allow Bash workers or review tools; native GPT agents use
-  the session's permissions. Remote Control, auto mode, plan mode, native Opus/Sonnet
+  session. Optional permissions allow Bash workers or review tools; native GPT agents keep
+  the session's permission mode and explicit deny rules, but run without prompts inside
+  claudex's confinement. Remote Control, auto mode, plan mode, native Opus/Sonnet
   subagents and everything else behave as before. Disable the plugin and it is gone.
 - **No Claude credential ever reaches the proxy.** Headless workers run with a placeholder
   `ANTHROPIC_AUTH_TOKEN` and a separate `CLAUDE_CONFIG_DIR` that has no login in it;
@@ -77,7 +78,7 @@ Precedence: what you say in the conversation > slash command > environment > con
 | `CLAUDEX_TIERS` | `luna,sol,astra` (`terra` accepted as sol) |
 | `CLAUDEX_DEFAULT_WORKER` | `sol` (`terra` accepted as sol) |
 | `CLAUDEX_ADVERSARY_MODEL` | `gpt-astra@xhigh` (family aliases or versioned slugs accepted) |
-| `CLAUDEX_MAX_PARALLEL` | `4` (1–16; headless workers queue, native agent spawns are denied at the limit) |
+| `CLAUDEX_MAX_PARALLEL` | `4` (1–16; native agent spawns count running native agents plus headless jobs and are denied at the limit; headless workers (Bash, relays, the adversary) count only headless jobs and queue, so they can exceed the limit while native agents run) |
 | `CLAUDEX_WORKER_MODE` | `edit`, `read` (headless `yolo` is per call only; not for agents) |
 
 `claudex-worker` enforces the master switch, tier list and parallel limit (including native
@@ -98,17 +99,34 @@ Claude Code 2.1.288 or later can load the claudex mod. With `CLAUDEX=on` it regi
 `claudex:gpt-luna`, `claudex:gpt-sol` and `claudex:gpt-astra` as native Agent types for
 enabled tiers. Dispatch them with the Agent tool, normally in the background: their tool
 rows appear live in the agent panel and the Agent tool notifies the parent when they finish.
+GPT agents finish by calling SubagentHandback like native agents, and each is capped at 200 turns.
 GPT text appears when each step completes, not live as its text is streamed. The Agent row
 shows the agent **type**, not the resolved GPT model. TaskStop cancels the agent's step.
 Agent admission checks the switch, enabled tiers and parallel limit; a refused spawn does
 not start an agent. The separate `claudex:relay-*` agents remain for Workflow scripts and
 Mods-off sessions; the adversary remains a read-only worker.
 
-A mod path check confines native GPT agents' Read, Write, Edit, Grep and Glob calls to
-paths lexically inside their working directory. It does not resolve symlinks or replace
-the session's permissions and sandbox. Bash follows those session rules alone; do not
-assume it is confined by the mod's file-path check. Native agents have `read` (Read,
-Grep, Glob) or `edit` (those plus Edit, Write, Bash) tools, not `yolo`.
+Native GPT agents run **without permission prompts, confined by claudex** ("yolo, but
+sandboxed"). Auto mode cannot judge GPT calls: its classifier verdict comes with the
+Anthropic response that produced a tool call, and GPT steps make no such request. The mod
+approves only tool-call ids emitted by GPT steps, after checking the core verdict;
+explicit deny rules and plan-mode denials still apply. Agents keep the session's permission
+mode; this is not `bypassPermissions`.
+
+A mod path check confines Read, Write, Edit, Grep and Glob calls to paths lexically inside
+the agent's working directory, then checks resolved paths to reject symlinks pointing outside.
+Bash is rewritten to `/usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin /bin/bash
+'<plugin>/bin/claudex-worker' sandbox --cwd '<agent cwd>' --path "$PATH" -c '<command>'`;
+**Bash rows show this wrapper**. Background Bash is not available to GPT agents.
+Bubblewrap allows writes only in that directory and private temporary storage, with no
+network. The rest of the filesystem is read-only; `/run` is hidden (as is `/var/run` when
+it is a real directory). Home is hidden except for the working directory and existing
+read-only toolchain and cache directories (`~/.local/bin`, `~/.local/lib`, `~/.cargo`,
+`~/.rustup`, `~/go`, `~/.cache`, `~/.npm`). Residual reachable pathname sockets are those
+inside the working directory and these read-only toolchain directories. Missing or unusable
+bubblewrap refuses the command, never runs it unsandboxed. Native agents have `read`
+(Read, Grep, Glob; Bash denied) or `edit` (those plus Edit, Write, Bash) tools, not a
+per-agent `yolo` mode.
 
 The mod shows running workers **and agents**, plan use and login life in the status line;
 headless workers and adversary findings in panes; and completion, low-login and
@@ -121,9 +139,11 @@ tools are `mcp__claudex__review` and `mcp__claudex__verdict`; add those names to
 Without the mod (Claude Mods is early access and can be switched off for an account), use the
 `/claudex:status` and `/claudex:config [KEY VALUE]` skills, or `! claudex-worker status`,
 `! claudex-worker config`, `! claudex-worker set KEY VALUE`. The mod hooks its session,
-review tools, file-path tools, command, panes, GPT agent offer/spawn and agent steps only.
-A non-claudex agent or main-loop step passes through unchanged (F8); the main-loop step
-makes no mod API call. All actions use worker argv, never a shell string or `yolo` (F2);
+review tools, file-path tools, Bash sandbox rewrite, GPT-call permission checks, command,
+panes, GPT agent offer/spawn and agent steps only. A non-claudex agent or main-loop step
+or Bash call passes through unchanged (F8); main-loop steps and Bash calls make no mod API
+call. All actions use worker builders, including the quoted Bash sandbox wrapper, never
+an unsandboxed command or `yolo` (F2);
 the mod never reads credentials (F3). When off it starts no new work (F4). It submits only
 owned-job completion notices, user-sent decisions, and effective policy changes (F5).
 Polling is bounded and generation-fenced (F6). Panes open on request, except unresolved
