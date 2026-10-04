@@ -1,0 +1,1251 @@
+#!/usr/bin/env bash
+# claudex-worker — run a GPT model as a headless Claude Code worker through claudex-proxy.
+#
+# The main Claude Code session is never touched: no env, no proxy, no settings. Each
+# worker is a separate `claude -p` process with its own config dir, a placeholder API
+# token (so no Claude credential can reach the proxy) and ANTHROPIC_BASE_URL on loopback.
+#
+# Policy (precedence: environment > config file > defaults) is enforced HERE, so it holds
+# even if the directing model ignores its instructions.
+set -euo pipefail
+umask 077
+
+VERSION="0.2.0"
+CONFIG_FILE="${CLAUDEX_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/claudex/config}"
+STATE_DIR="${CLAUDEX_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/claudex}"
+PORT="${CLAUDEX_PORT:-18765}"
+CLAUDE_BIN="${CLAUDEX_CLAUDE_BIN:-claude}"
+PROXY_BIN="${CLAUDEX_PROXY_BIN:-claudex-proxy}"
+# Service managers start us with a bare PATH: fall back to the proxy installed next to this script.
+if [[ -z "${CLAUDEX_PROXY_BIN:-}" ]] && ! command -v claudex-proxy >/dev/null 2>&1; then
+    _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    [[ -x "$_self_dir/claudex-proxy" ]] && PROXY_BIN="$_self_dir/claudex-proxy"
+fi
+AUTH_FILE="${CODEX_HOME:-$HOME/.codex}/auth.json"
+
+die() { local code=$1; shift; echo "claudex-worker: $*" >&2; exit "$code"; }
+
+# ---- policy -----------------------------------------------------------------
+
+KEYS=(CLAUDEX CLAUDEX_DELEGATION CLAUDEX_ADVERSARY CLAUDEX_TIERS CLAUDEX_DEFAULT_WORKER
+      CLAUDEX_ADVERSARY_MODEL CLAUDEX_MAX_PARALLEL CLAUDEX_WORKER_MODE)
+declare -A CFG=(
+    [CLAUDEX]=on
+    [CLAUDEX_DELEGATION]=on-request
+    [CLAUDEX_ADVERSARY]=on-request
+    [CLAUDEX_TIERS]=luna,sol,astra
+    [CLAUDEX_DEFAULT_WORKER]=sol
+    [CLAUDEX_ADVERSARY_MODEL]=gpt-astra@xhigh
+    [CLAUDEX_MAX_PARALLEL]=4
+    [CLAUDEX_WORKER_MODE]=edit
+)
+declare -A CFG_SOURCE=()
+for _key in "${KEYS[@]}"; do CFG_SOURCE[$_key]=default; done
+unset _key
+declare -A PATTERN=(
+    [CLAUDEX]='^(on|off)$'
+    [CLAUDEX_DELEGATION]='^(on-request|suggest|auto|off)$'
+    [CLAUDEX_ADVERSARY]='^(on-request|plans|plans\+diffs|off)$'
+    [CLAUDEX_TIERS]='^(luna|terra|sol|astra)(,(luna|terra|sol|astra))*$'
+    [CLAUDEX_DEFAULT_WORKER]='^(luna|terra|sol|astra)$'
+    [CLAUDEX_ADVERSARY_MODEL]='^gpt-(([0-9]+(\.[0-9]+)?-)?(luna|sol|astra|terra))(@(low|medium|high|xhigh|max|ultra))?$'
+    [CLAUDEX_MAX_PARALLEL]='^([1-9]|1[0-6])$'
+    [CLAUDEX_WORKER_MODE]='^(edit|read)$'   # yolo is per-call only, never a default
+)
+
+valid() { [[ -n "${PATTERN[$1]+x}" && "$2" =~ ${PATTERN[$1]} ]]; }
+
+load_policy() {
+    local line key value
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # The file is parsed as data. It is never sourced or evaluated.
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+            if [[ "$line" =~ ^([A-Z_]+)=(.*)$ ]]; then
+                key="${BASH_REMATCH[1]}" value="${BASH_REMATCH[2]}"
+                valid "$key" "$value" || die 2 "invalid setting in $CONFIG_FILE: $line"
+                CFG[$key]="$value"
+                CFG_SOURCE[$key]=file
+            else
+                die 2 "unparseable line in $CONFIG_FILE: $line"
+            fi
+        done < "$CONFIG_FILE"
+    fi
+    for key in "${KEYS[@]}"; do
+        if [[ -n "${!key+x}" ]]; then
+            valid "$key" "${!key}" || die 2 "invalid value for $key: ${!key}"
+            CFG[$key]="${!key}"
+            CFG_SOURCE[$key]=env
+        fi
+    done
+}
+
+cmd_config() { local k; for k in "${KEYS[@]}"; do echo "$k=${CFG[$k]}"; done; }
+
+cmd_set() {
+    [[ $# -eq 2 ]] || die 2 "usage: claudex-worker set KEY VALUE"
+    valid "$1" "$2" || die 2 "invalid key or value: $1=$2"
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    local tmp="$CONFIG_FILE.tmp.$$"
+    { [[ -f "$CONFIG_FILE" ]] && grep -v "^$1=" "$CONFIG_FILE" || true; echo "$1=$2"; } > "$tmp"
+    mv "$tmp" "$CONFIG_FILE"
+    echo "$1=$2"
+}
+
+terra_deprecated() {
+    [[ ",${CFG[CLAUDEX_TIERS]}," == *,terra,* || "${CFG[CLAUDEX_DEFAULT_WORKER]}" == terra ||
+       "${CFG[CLAUDEX_ADVERSARY_MODEL]%@*}" == *-terra ]]
+}
+
+cmd_policy_line() {
+    [[ "${CFG[CLAUDEX]}" == on ]] || return 0
+    local warning="" mapping="" health=''
+    terra_deprecated && warning=" terra is deprecated (served by sol)."
+    health=$(proxy_health) || health=''
+    if [[ "$health" == *'"service":"claudex-proxy"'* ]]; then
+        mapping=$(jq -r 'if (.models | type) == "object" then
+            " models: luna=\(.models.luna) sol=\(.models.sol) astra=\(.models.astra) (\(.models.source))."
+            else empty end' <<< "$health" 2>/dev/null) || mapping=''
+    fi
+    echo "claudex (GPT layer) is ON: delegation=${CFG[CLAUDEX_DELEGATION]} adversary=${CFG[CLAUDEX_ADVERSARY]}" \
+         "tiers=${CFG[CLAUDEX_TIERS]} default_worker=${CFG[CLAUDEX_DEFAULT_WORKER]}" \
+         "adversary_model=${CFG[CLAUDEX_ADVERSARY_MODEL]} max_parallel=${CFG[CLAUDEX_MAX_PARALLEL]}" \
+         "worker_mode=${CFG[CLAUDEX_WORKER_MODE]}." \
+         "What the user says in this conversation overrides these settings. Use GPT only as the claudex:delegating-to-gpt skill describes.$mapping$warning"
+}
+
+# ---- tiers ------------------------------------------------------------------
+
+tier_slug() {
+    case "$1" in
+        luna) echo gpt-luna ;; terra|sol) echo gpt-sol ;;
+        astra) echo gpt-astra ;;
+        *) return 1 ;;
+    esac
+}
+tier_default_effort() { case "$1" in luna) echo low ;; terra|sol) echo high ;; astra) echo xhigh ;; esac; }
+slug_tier() {
+    case "$1" in
+        *-luna) echo luna ;; *-sol|*-terra) echo sol ;; *-astra) echo astra ;;
+    esac
+}
+tier_enabled() {
+    local gate=$1 tiers=",${CFG[CLAUDEX_TIERS]},"
+    [[ "$gate" != terra ]] || gate=sol
+    [[ "$tiers" == *",$gate,"* || ( "$gate" == sol && "$tiers" == *,terra,* ) ]]
+}
+
+# ---- proxy ------------------------------------------------------------------
+
+proxy_health() { curl -fsS -m 2 "http://127.0.0.1:$PORT/healthz" 2>/dev/null; }
+proxy_healthy() { proxy_health | grep -q '"service":"claudex-proxy"'; }
+
+codex_version() {
+    command -v codex >/dev/null 2>&1 || return 0
+    local output
+    output=$(timeout 2s codex --version 2>/dev/null) || return 0
+    [[ "$output" =~ ^codex-cli[[:space:]]+([0-9]+(\.[0-9]+)+)$ ]] && printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+}
+
+# The proxy is non-dumpable, so /proc and `ss -p` cannot identify it. Instead the launcher
+# gives each proxy a random nonce (kept in a 0600 file) and /healthz must echo it back.
+proxy_is_ours() {
+    local want got
+    [[ -r "$STATE_DIR/instance" ]] || return 1
+    want=$(< "$STATE_DIR/instance")
+    got=$(proxy_health | jq -r '.instance // empty' 2>/dev/null) || return 1
+    [[ -n "$want" && "$got" == "$want" ]]
+}
+
+ensure_proxy() {
+    [[ -n "${CLAUDEX_TEST_SKIP_PROXY:-}" ]] && return 0
+    command -v "$PROXY_BIN" >/dev/null || die 6 "$PROXY_BIN not found on PATH (run 'make install' in the claudex repo)"
+    mkdir -p "$STATE_DIR"
+    if ! proxy_health >/dev/null; then
+        (
+            until flock -n 9; do
+                [[ -z "${WORK_DIR:-}" || ! -f "$WORK_DIR/stop" ]] || exit 130
+                sleep 0.1
+            done
+            [[ -z "${WORK_DIR:-}" || ! -f "$WORK_DIR/stop" ]] || exit 130
+            if ! proxy_health >/dev/null; then
+                nonce=$(new_nonce)
+                ( umask 077; printf '%s' "$nonce" > "$STATE_DIR/instance" )
+                CLAUDEX_INSTANCE="$nonce" CLAUDEX_CODEX_VERSION="$(codex_version)" setsid "$PROXY_BIN" --port "$PORT" >> "$STATE_DIR/proxy.log" 2>&1 < /dev/null 9>&- &
+                for _ in $(seq 50); do
+                    [[ -z "${WORK_DIR:-}" || ! -f "$WORK_DIR/stop" ]] || return 1
+                    proxy_health >/dev/null && break
+                    sleep 0.1
+                done
+            fi
+        ) 9> "$STATE_DIR/start.lock"
+    fi
+    proxy_health >/dev/null || die 6 "claudex-proxy did not come up; see $STATE_DIR/proxy.log"
+    proxy_is_ours || die 6 "something else is listening on 127.0.0.1:$PORT (not the proxy this launcher started); refusing to send requests to it"
+}
+
+new_nonce() { od -An -tx1 -N16 /dev/urandom | tr -d ' \n'; }
+
+# What the service managers (systemd, OpenRC) run: the proxy in the FOREGROUND, under a
+# fresh nonce that workers will recognise. If an on-demand proxy of ours already holds the
+# port it is replaced, so the supervisor owns the one and only proxy. A listener that is not
+# ours is never touched.
+cmd_proxy_exec() {
+    command -v "$PROXY_BIN" >/dev/null || die 6 "$PROXY_BIN not found on PATH (run 'make install' in the claudex repo)"
+    mkdir -p "$STATE_DIR"
+    exec 9> "$STATE_DIR/start.lock"
+    flock 9
+    if proxy_health >/dev/null; then
+        proxy_is_ours || die 6 "something else is listening on 127.0.0.1:$PORT; not starting and not touching it"
+        local old; old=$(proxy_health | jq -r '.pid // empty')
+        [[ "$old" =~ ^[0-9]+$ ]] && kill "$old" 2>/dev/null || true
+        for _ in $(seq 50); do proxy_health >/dev/null || break; sleep 0.1; done
+        proxy_health >/dev/null && die 6 "the previous claudex-proxy on port $PORT did not exit"
+    fi
+    local nonce; nonce=$(new_nonce)
+    ( umask 077; printf '%s' "$nonce" > "$STATE_DIR/instance" )
+    exec 9>&-
+    CLAUDEX_INSTANCE="$nonce" CLAUDEX_CODEX_VERSION="$(codex_version)" exec "$PROXY_BIN" --port "$PORT"
+}
+
+# exp claim of the Codex access token. The token only ever travels through pipes.
+token_exp() {
+    [[ -r "$AUTH_FILE" ]] || return 0
+    jq -r '.tokens.access_token // empty' "$AUTH_FILE" | cut -d. -f2 | tr '_-' '/+' |
+        awk '{ n = length($0) % 4; if (n == 2) $0 = $0 "=="; else if (n == 3) $0 = $0 "="; print }' |
+        base64 -d 2>/dev/null | jq -r '.exp // empty' 2>/dev/null || true
+}
+
+# claudex never refreshes tokens. If the login is about to lapse, let Codex do it.
+token_preflight() {
+    [[ -n "${CLAUDEX_TEST_SKIP_PROXY:-}" ]] && return 0
+    local exp; exp=$(token_exp)
+    [[ -n "$exp" ]] || return 0
+    if (( exp - $(date +%s) < 300 )) && command -v codex >/dev/null; then
+        local refresh
+        [[ -z "${WORK_DIR:-}" || ! -f "$WORK_DIR/stop" ]] || return 130
+        timeout -k 2s 120s codex exec --skip-git-repo-check -m gpt-6-luna "Reply with: ok" >/dev/null 2>&1 &
+        refresh=$!
+        while process_identity "$refresh" >/dev/null; do
+            if [[ -n "${WORK_DIR:-}" && -f "$WORK_DIR/stop" ]]; then
+                return 130
+            fi
+            sleep 0.1
+        done
+        wait "$refresh" 2>/dev/null || true
+        [[ -z "${WORK_DIR:-}" || ! -f "$WORK_DIR/stop" ]] || return 130
+    fi
+}
+
+plan_json() {
+    local log="${CLAUDEX_LOG:-$STATE_DIR/proxy.log}" line stamp pct limit ts age
+    [[ -f "$log" ]] || { printf 'null\n'; return; }
+    while IFS= read -r line; do
+        [[ "$line" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)[[:space:]] ]] || continue
+        stamp=${BASH_REMATCH[1]}
+        [[ "$line" =~ (^|[[:space:]])used_pct=([0-9]+(\.[0-9]+)?)([[:space:]]|$) ]] || continue
+        pct=${BASH_REMATCH[2]}
+        [[ "$line" =~ (^|[[:space:]])limit=([^[:space:]]+) ]] || continue
+        limit=${BASH_REMATCH[2]}
+        ts=$(date -u -d "$stamp" +%s 2>/dev/null) || continue
+        age=$(( $(date +%s) - ts ))
+        (( age >= 0 )) || age=0
+        jq -cn --argjson used_pct "$pct" --arg limit "$limit" --argjson age_s "$age" \
+            '{used_pct:$used_pct,limit:$limit,age_s:$age_s}'
+        return
+    done < <(tac -- "$log")
+    printf 'null\n'
+}
+
+cmd_status() {
+    local json=${1:-} exp up=false ours=false policy sources key health='' models=null deprecations='[]'
+    [[ $# -le 1 && ( -z "$json" || "$json" == --json ) ]] || die 2 "usage: claudex-worker status [--json]"
+    health=$(proxy_health) || health=''
+    if [[ "$health" == *'"service":"claudex-proxy"'* ]]; then
+        up=true
+        models=$(jq -c '.models // null' <<< "$health") || models=null
+    fi
+    terra_deprecated && deprecations='["terra is deprecated (served by sol)"]'
+    if [[ "$json" != --json ]]; then
+        cmd_config
+        if [[ "$up" == true ]]; then
+            echo "proxy=up port=$PORT ours=$(proxy_is_ours && echo yes || echo NO)"
+            if [[ "$models" != null ]]; then
+                jq -r '"models: luna=\(.luna) sol=\(.sol) astra=\(.astra) (\(.source))"' <<< "$models"
+            fi
+        else echo "proxy=down port=$PORT (starts on demand)"; fi
+        [[ "$deprecations" == '[]' ]] || echo "terra is deprecated (served by sol)"
+        exp=$(token_exp)
+        if [[ -n "$exp" ]]; then echo "codex_token_hours_left=$(( (exp - $(date +%s)) / 3600 ))"; else echo "codex_token=unreadable (run \`codex login\`)"; fi
+        return
+    fi
+    [[ "$up" == true ]] && proxy_is_ours && ours=true
+    exp=$(token_exp)
+    [[ "$exp" =~ ^[0-9]+$ ]] && exp=$(( (exp - $(date +%s)) / 3600 )) || exp=null
+    policy=$(for key in "${KEYS[@]}"; do printf '%s=%s\n' "$key" "${CFG[$key]}"; done | jq -Rn '[inputs | split("=") | {(.[0]):.[1]}] | add')
+    sources=$(for key in "${KEYS[@]}"; do printf '%s=%s\n' "$key" "${CFG_SOURCE[$key]}"; done | jq -Rn '[inputs | split("=") | {(.[0]):.[1]}] | add')
+    jq -cn --argjson policy "$policy" --argjson policy_sources "$sources" --argjson up "$up" \
+        --argjson ours "$ours" --argjson port "$PORT" --argjson token_hours_left "$exp" \
+        --argjson plan "$(plan_json)" --argjson models "$models" --argjson deprecations "$deprecations" \
+        '{policy:$policy,policy_sources:$policy_sources,proxy:{up:$up,ours:$ours,port:$port},token_hours_left:$token_hours_left,plan:$plan,models:$models,deprecations:$deprecations}'
+}
+
+cmd_stop_proxy() {
+    proxy_health >/dev/null || { echo "proxy not running"; return 0; }
+    proxy_is_ours || die 6 "port $PORT is not held by the proxy this launcher started; not touching it"
+    local pid; pid=$(proxy_health | jq -r '.pid // empty')
+    [[ "$pid" =~ ^[0-9]+$ ]] || die 6 "proxy did not report a pid"
+    kill "$pid"
+    echo "proxy stopped"
+}
+
+# ---- running a worker -------------------------------------------------------
+
+acquire_slot() {
+    local n="${CFG[CLAUDEX_MAX_PARALLEL]}" i
+    mkdir -p "$STATE_DIR/slots" || return 1
+    while :; do
+        [[ ! -f "$WORK_DIR/stop" ]] || return 130
+        for ((i = 1; i <= n; i++)); do
+            [[ ! -f "$WORK_DIR/stop" ]] || return 130
+            exec {SLOT_FD}> "$STATE_DIR/slots/$i.lock" || return 1
+            if flock -n "$SLOT_FD"; then
+                [[ ! -f "$WORK_DIR/stop" ]] || return 130
+                return 0
+            fi
+            exec {SLOT_FD}>&- || return 1
+        done
+        sleep 0.2 || return 1
+    done
+}
+
+READ_CONTRACT="You are a GPT model running as a read-only worker inside Claude Code, dispatched by another model that is directing the work. You can inspect the repository but you cannot modify files or run commands. Follow the brief exactly. Cite evidence as path:line. Say plainly when you are unsure or could not verify something. Finish with your complete answer; nobody can reply to questions."
+FINDINGS_CONTRACT="For an adversarial review, end your report with exactly one fenced block with info string claudex-findings containing only one JSON array of at most 50 findings. Each finding has exactly these fields: id (unique F1, F2, ...; at most 16 characters), severity (critical, high, medium, or low), title (at most 200 characters), mechanism, evidence, fix (each at most 2000 characters), and unverified (boolean). Keep the entire serialized array at most 256 KiB. When the prose justifies no findings, use an empty array []. Keep the prose report outside this block."
+WRITE_CONTRACT="You are a GPT model running as a worker inside Claude Code, dispatched by another model that is directing the work. Follow the brief exactly and stay inside its scope. When done, report: what you changed (paths), the commands you ran with their actual output, and anything you could not finish or verify. Do not claim tests pass unless you ran them and show the output. Nobody can reply to questions, so make reasonable choices and state them."
+
+# All worker entry points use the same switch, tier and adversary policy checks.
+check_worker_tier() {
+    WORK_TIER=$1
+    [[ "${CFG[CLAUDEX]}" == on ]] || die 3 "claudex is disabled (CLAUDEX=off); not using GPT"
+    if [[ "$WORK_TIER" == adversary ]]; then
+        WORK_SLUG="${CFG[CLAUDEX_ADVERSARY_MODEL]%@*}"
+        [[ "$WORK_SLUG" != *-terra ]] || WORK_SLUG=gpt-sol
+        [[ -n "$WORK_EFFORT" ]] || { [[ "${CFG[CLAUDEX_ADVERSARY_MODEL]}" == *@* ]] && WORK_EFFORT="${CFG[CLAUDEX_ADVERSARY_MODEL]#*@}"; }
+        [[ -z "$WORK_MODE" || "$WORK_MODE" == read ]] || die 2 "the adversary is always read-only"
+        WORK_MODE=read
+        WORK_GATE=$(slug_tier "$WORK_SLUG")
+    else
+        WORK_SLUG=$(tier_slug "$WORK_TIER") || die 2 "unknown tier '$WORK_TIER' (use luna, terra, sol, astra or adversary)"
+        WORK_GATE=$WORK_TIER
+        [[ "$WORK_GATE" != terra ]] || WORK_GATE=sol
+    fi
+    tier_enabled "$WORK_GATE" || die 4 "tier '$WORK_GATE' is not enabled (CLAUDEX_TIERS=${CFG[CLAUDEX_TIERS]})"
+}
+
+# Shared synchronous preflight for run and start. It consumes stdin before any job is created.
+preflight() {
+    [[ $# -ge 1 ]] || die 2 "usage: claudex-worker run TIER [options] < brief"
+    WORK_TIER=$1; shift
+    WORK_CWD="$PWD" WORK_EFFORT="" WORK_MODE="" WORK_MAX_TURNS=60 WORK_RESUME=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --cwd|--effort|--mode|--max-turns|--resume)
+                [[ $# -ge 2 && -n "$2" ]] || die 2 "missing value for $1"
+                case "$1" in
+                    --cwd) WORK_CWD=$2 ;; --effort) WORK_EFFORT=$2 ;; --mode) WORK_MODE=$2 ;;
+                    --max-turns) WORK_MAX_TURNS=$2 ;; --resume) WORK_RESUME=$2 ;;
+                esac
+                shift 2 ;;
+            *) die 2 "unknown option: $1" ;;
+        esac
+    done
+    [[ -z "$WORK_RESUME" || "$WORK_RESUME" =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]] || die 2 "invalid session id"
+    check_worker_tier "$WORK_TIER"
+    [[ -n "$WORK_EFFORT" ]] || WORK_EFFORT=$(tier_default_effort "$WORK_GATE")
+    [[ "$WORK_EFFORT" =~ ^(low|medium|high|xhigh|max|ultra)$ ]] || die 2 "invalid effort '$WORK_EFFORT'"
+    [[ -n "$WORK_MODE" ]] || WORK_MODE="${CFG[CLAUDEX_WORKER_MODE]}"
+    [[ "$WORK_MAX_TURNS" =~ ^[0-9]+$ ]] || die 2 "invalid --max-turns"
+    [[ -d "$WORK_CWD" ]] || die 2 "no such directory: $WORK_CWD"
+    case "$WORK_MODE" in
+        read|edit|yolo) ;; *) die 2 "invalid mode '$WORK_MODE' (read, edit, or yolo per call)" ;;
+    esac
+    WORK_CWD=$(cd "$WORK_CWD" && pwd -P)
+    WORK_BRIEF=$(cat)
+    [[ -n "${WORK_BRIEF//[[:space:]]/}" ]] || die 2 "empty brief on stdin"
+    WORK_MODEL="$WORK_SLUG@$WORK_EFFORT"
+}
+
+signal_worker() {
+    : | atomic_file "$WORK_DIR/stop" || true
+    WORK_STOPPING=true
+}
+
+run_worker() {
+    local cwd=$WORK_CWD mode=$WORK_MODE model=$WORK_MODEL gate=$WORK_GATE tier=$WORK_TIER
+    local resume=$WORK_RESUME max_turns=$WORK_MAX_TURNS child=''
+    trap signal_worker TERM INT HUP
+
+    # Verified live (SPIKES.md, spike 3): pre-approving a file tool by bare name approves it
+    # EVERYWHERE, so a worker could write to $HOME or read ~/.ssh and ship it upstream.
+    #   read: nothing pre-approved. dontAsk still permits reads inside the working directory
+    #         and denies reads/globs outside it.
+    #   edit: only Bash is pre-approved, and Bash runs inside Claude Code's sandbox (writes
+    #         confined to the working directory, no network, $HOME unreadable except the working
+    #         directory and toolchains). Edit/Write go through acceptEdits, which only
+    #         auto-approves paths inside the working directory.
+    #   yolo: no confinement at all. Per call only, on the user's explicit request.
+    local tools perm contract approve="" settings=""
+    case "$mode" in
+        read) tools="Read,Grep,Glob"; perm=dontAsk; contract=$READ_CONTRACT ;;
+        edit) tools="Read,Grep,Glob,Edit,Write,NotebookEdit,Bash"; perm=acceptEdits; contract=$WRITE_CONTRACT; approve="Bash"
+              settings=$(jq -cn --arg cwd "$cwd" --arg h "$HOME" '{sandbox:{enabled:true,failIfUnavailable:true,
+                  autoAllowBashIfSandboxed:true,allowUnsandboxedCommands:false,
+                  filesystem:{denyRead:[$h],allowRead:[$cwd,($h+"/.local/bin"),($h+"/.local/lib"),($h+"/.cargo"),
+                                                       ($h+"/.rustup"),($h+"/go"),($h+"/.cache"),($h+"/.npm")]}}}') || { echo 'cannot build sandbox settings' >&2; return 1; }
+              [[ -n "$settings" ]] || { echo 'empty sandbox settings' >&2; return 1; } ;;
+        yolo) tools="Read,Grep,Glob,Edit,Write,NotebookEdit,Bash"; perm=bypassPermissions; contract=$WRITE_CONTRACT ;;
+        *) die 2 "invalid mode '$mode' (read, edit, or yolo per call)" ;;
+    esac
+    [[ "$tier" != adversary ]] || contract="$READ_CONTRACT $FINDINGS_CONTRACT"
+
+    [[ ! -f "$WORK_DIR/stop" ]] || return 130
+    ensure_proxy || return 1
+    [[ ! -f "$WORK_DIR/stop" ]] || return 130
+    token_preflight || return 1
+    [[ ! -f "$WORK_DIR/stop" ]] || return 130
+    acquire_slot || return $?
+    [[ ! -f "$WORK_DIR/stop" ]] || return 130
+
+    local config_dir="$STATE_DIR/claude-config" rc=0
+    mkdir -p "$config_dir" || return 1
+    local args=(-p --model "$model" --output-format json --max-turns "$max_turns"
+                --permission-mode "$perm" --tools "$tools" --append-system-prompt "$contract")
+    [[ -n "$approve" ]] && args+=(--allowedTools "$approve")
+    [[ -n "$settings" ]] && args+=(--settings "$settings")
+    [[ -n "$resume" ]] && args+=(--resume "$resume")
+
+    # A new session/process group makes cancellation affect only this worker and its children.
+    # Nothing from the parent Claude Code session (or any real credential) reaches it.
+    local -a test_env=()
+    if [[ -n "${CLAUDEX_TEST_SKIP_PROXY:-}" ]]; then
+        [[ -z "${STUB_LOG:-}" ]] || test_env+=("STUB_LOG=$STUB_LOG")
+        [[ -z "${STUB_SLEEP:-}" ]] || test_env+=("STUB_SLEEP=$STUB_SLEEP")
+        [[ -z "${STUB_RC:-}" ]] || test_env+=("STUB_RC=$STUB_RC")
+        [[ -z "${STUB_FINDINGS:-}" ]] || test_env+=("STUB_FINDINGS=$STUB_FINDINGS")
+        [[ -z "${STUB_PIDS:-}" ]] || test_env+=("STUB_PIDS=$STUB_PIDS")
+        [[ -z "${STUB_IGNORE_TERM:-}" ]] || test_env+=("STUB_IGNORE_TERM=$STUB_IGNORE_TERM")
+        [[ -z "${STUB_SPAWN_CHILD:-}" ]] || test_env+=("STUB_SPAWN_CHILD=$STUB_SPAWN_CHILD")
+        [[ -z "${STUB_DESCENDANT:-}" ]] || test_env+=("STUB_DESCENDANT=$STUB_DESCENDANT")
+        [[ -z "${STUB_FINDINGS_FILE:-}" ]] || test_env+=("STUB_FINDINGS_FILE=$STUB_FINDINGS_FILE")
+    fi
+    # The anchor holds the process-group id until every non-zombie member has exited.
+    # In particular a TERM-sensitive Claude leader cannot release the id while a descendant
+    # ignores TERM. The anchor, not Claude, is recorded in child.json.
+    exec {LAUNCH_FD}> "$WORK_DIR/lock"
+    flock "$LAUNCH_FD"
+    if [[ -f "$WORK_DIR/stop" ]]; then
+        flock -u "$LAUNCH_FD"; exec {LAUNCH_FD}>&-
+        return 130
+    fi
+    ( exec {LAUNCH_FD}>&- {SLOT_FD}>&-
+      cd "$cwd" && exec setsid bash -c '
+        trap ":" TERM INT HUP
+        job_dir=$1 brief_file=$2; shift 2
+        acknowledge_hold() {
+            if [[ -f "$job_dir/hold" && ! -f "$job_dir/held" ]]; then
+                saved=$(jq -c --argjson pid "$$" "select(.pid==\$pid and .pgid==\$pid)" "$job_dir/child.json" 2>/dev/null) || saved=""
+                if [[ -n "$saved" ]]; then
+                    printf "%s\n" "$saved" > "$job_dir/.held.$$"
+                    mv -f -- "$job_dir/.held.$$" "$job_dir/held"
+                fi
+            elif [[ ! -f "$job_dir/hold" ]]; then
+                rm -f -- "$job_dir/held"
+            fi
+        }
+        while [[ ! -f "$job_dir/go" ]]; do
+            [[ ! -f "$job_dir/stop" ]] || exit 130
+            sleep 0.05
+        done
+        rc=0
+        if [[ -f "$job_dir/stop" ]]; then
+            rc=130
+        else
+            "$@" < "$brief_file" & worker=$!
+            while :; do
+                acknowledge_hold
+                if kill -0 "$worker" 2>/dev/null; then
+                    sleep 0.05
+                    continue
+                fi
+                wait "$worker" || rc=$?
+                break
+            done
+        fi
+        while :; do
+            remaining=false
+            for statfile in /proc/[0-9]*/stat; do
+                [[ -r "$statfile" ]] || continue
+                stat=$(< "$statfile") 2>/dev/null || continue
+                rest=${stat##*) }
+                set -- $rest
+                if [[ ${3:-} == "$$" && ${1:-} != Z && ${statfile#/proc/} != "$$/stat" ]]; then
+                    remaining=true; break
+                fi
+            done
+            [[ "$remaining" == true || -f "$job_dir/hold" ]] || break
+            acknowledge_hold
+            sleep 0.05
+        done
+        rm -f -- "$job_dir/held"
+        exit "$rc"
+    ' claudex-anchor "$WORK_DIR" "$WORK_DIR/brief" env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" LANG="${LANG:-C.UTF-8}" TERM="${TERM:-dumb}" \
+        "${test_env[@]}" CLAUDE_CONFIG_DIR="$config_dir" \
+        ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT" ANTHROPIC_AUTH_TOKEN="claudex-local" \
+        ANTHROPIC_DEFAULT_HAIKU_MODEL="gpt-luna" CLAUDE_CODE_SUBAGENT_MODEL="$model" \
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_ATTRIBUTION_HEADER=0 \
+        "$CLAUDE_BIN" "${args[@]}" ) > "$WORK_RAW" 2> "$WORK_RAW.err" &
+    child=$!
+    local ident i
+    for ((i=0; i<50; i++)); do
+        ident=$(process_identity "$child") || ident=""
+        if [[ -n "$ident" && "$(jq -r '.pid==.pgid' <<< "$ident")" == true ]]; then break; fi
+        [[ ! -f "$WORK_DIR/stop" ]] || break
+        sleep 0.01
+    done
+    if [[ -n "${ident:-}" && "$(jq -r '.pid==.pgid' <<< "$ident")" == true ]]; then
+        if ! printf '%s\n' "$ident" | atomic_file "$WORK_DIR/child.json"; then
+            : | atomic_file "$WORK_DIR/stop" || true
+            wait "$child" 2>/dev/null || true
+            flock -u "$LAUNCH_FD"; exec {LAUNCH_FD}>&-
+            echo 'cannot record child identity' >&2
+            return 1
+        fi
+    else
+        : | atomic_file "$WORK_DIR/stop" || true
+        wait "$child" 2>/dev/null || true
+        flock -u "$LAUNCH_FD"; exec {LAUNCH_FD}>&-
+        [[ ! -f "$WORK_DIR/cancelled" ]] || return 130
+        echo 'cannot identify worker anchor' >&2
+        return 1
+    fi
+    flock -u "$LAUNCH_FD"; exec {LAUNCH_FD}>&-
+    while process_identity "$child" >/dev/null; do sleep 0.1; done
+    wait "$child" || rc=$?
+    [[ ! -f "$WORK_DIR/stop" ]] || return 130
+
+    local report session turns is_error
+    report=$(jq -r '.result // empty' "$WORK_RAW" 2>/dev/null) || report=""
+    session=$(jq -r '.session_id // "-"' "$WORK_RAW" 2>/dev/null) || session="-"
+    turns=$(jq -r '.num_turns // "-"' "$WORK_RAW" 2>/dev/null) || turns="-"
+    is_error=$(jq -r '.is_error // false' "$WORK_RAW" 2>/dev/null) || is_error=true
+
+    if [[ -z "$report" ]]; then
+        echo "(worker produced no report; exit code $rc)"
+        [[ ! -f "$WORK_RAW" ]] || head -c 2000 "$WORK_RAW"
+        [[ ! -f "$WORK_RAW.err" ]] || head -c 2000 "$WORK_RAW.err" >&2
+        is_error=true
+    else
+        printf '%s\n' "$report"
+    fi
+    printf '\n--- claudex-worker ---\ntier=%s model=%s mode=%s session=%s turns=%s is_error=%s\n' \
+        "$gate" "$model" "$mode" "$session" "$turns" "$is_error"
+    echo "follow up with: claudex-worker resume $session $tier"
+    [[ "$is_error" == false && $rc -eq 0 ]]
+}
+
+cmd_resume() {
+    [[ $# -ge 2 ]] || die 2 "usage: claudex-worker resume SESSION_ID TIER [options] < brief"
+    local id=$1 tier=$2; shift 2
+    cmd_run "$tier" "$@" --resume "$id"
+}
+
+# ---- supervised jobs (a Bash tool call is capped at 10 minutes) ---------------
+
+jobs_root() {
+    mkdir -p "$STATE_DIR"
+    [[ ! -L "$STATE_DIR/jobs" ]] || die 2 "jobs directory is a symlink"
+    if [[ -e "$STATE_DIR/jobs" ]]; then
+        [[ -d "$STATE_DIR/jobs" ]] || die 2 "jobs path is not a directory"
+    else
+        ( umask 077; mkdir -p "$STATE_DIR/jobs" ) || die 2 "cannot create jobs directory"
+    fi
+    [[ ! -L "$STATE_DIR/jobs" && -d "$STATE_DIR/jobs" ]] || die 2 "jobs path is not a directory or is a symlink"
+    [[ "$(stat -c %u "$STATE_DIR/jobs")" == "$(id -u)" ]] || die 2 "jobs directory is not owned by this user"
+    chmod 0700 "$STATE_DIR/jobs"
+}
+
+job_dir() {
+    [[ "$1" =~ ^[0-9]+-([0-9a-f]{8}|[0-9]+)$ ]] || die 2 "invalid job id"
+    local dir="$STATE_DIR/jobs/$1"
+    [[ ! -L "$dir" ]] || die 2 "job directory is a symlink: $1"
+    if [[ -e "$dir" ]]; then
+        [[ -d "$dir" && "$(stat -c %u "$dir")" == "$(id -u)" ]] || die 2 "unsafe job directory: $1"
+        chmod 0700 "$dir"
+    fi
+    printf '%s\n' "$dir"
+}
+
+atomic_file() { # atomic_file PATH < content
+    local tmp
+    tmp=$(mktemp "${1}.XXXXXX")
+    cat > "$tmp"
+    mv -f -- "$tmp" "$1"
+}
+
+prune_jobs() {
+    local d dir
+    for d in "$STATE_DIR"/jobs/*; do
+        [[ -e "$d" || -L "$d" ]] || continue
+        dir=$(job_dir "${d##*/}")
+        [[ -f "$dir/rc" && ! -L "$dir/rc" ]] || continue
+        # Only finished jobs are eligible. An unfinished job can be older than seven days.
+        if [[ -n "$(find "$dir/rc" -maxdepth 0 -mtime +6 -print)" ]]; then rm -rf -- "$dir"; fi
+    done
+}
+
+new_job() {
+    jobs_root
+    prune_jobs
+    local i id dir origin=bash owner=null created=false
+    [[ "${CLAUDEX_JOB_ORIGIN:-}" == mod ]] && origin=mod
+    [[ -z "${CLAUDEX_JOB_OWNER:-}" ]] || owner=$(jq -Rn --arg owner "$CLAUDEX_JOB_OWNER" '$owner')
+    for ((i=0; i<20; i++)); do
+        id="$(date +%s)-$(od -An -tx1 -N4 /dev/urandom | tr -d ' \n')"
+        dir=$(job_dir "$id")
+        if ( umask 077; mkdir -- "$dir" ) 2>/dev/null; then created=true; break; fi
+    done
+    [[ "$created" == true ]] || die 2 "cannot allocate job id"
+    WORK_ID=$id WORK_DIR=$dir
+    install_job_guard
+    chmod 0700 "$dir"
+    printf '%s\n' "$WORK_BRIEF" | atomic_file "$dir/brief"
+    jq -cn --arg id "$id" --arg tier "$WORK_TIER" --arg kind "$([[ "$WORK_TIER" == adversary ]] && printf adversary || printf worker)" \
+        --arg model "$WORK_MODEL" --arg mode "$WORK_MODE" --arg cwd "$WORK_CWD" \
+        --arg origin "$origin" --argjson owner "$owner" --argjson started "${id%%-*}" \
+        '{id:$id,tier:$tier,kind:$kind,model:$model,mode:$mode,cwd:$cwd,started:$started,origin:$origin,owner:$owner,supervisor:null}' \
+        | atomic_file "$dir/meta.json"
+}
+
+# stat's comm field can contain spaces or parentheses; split only after the final ') '.
+process_identity() {
+    local pid=$1 stat rest
+    [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 && -r "/proc/$pid/stat" ]] || return 1
+    stat=$(< "/proc/$pid/stat") 2>/dev/null || return 1
+    rest=${stat##*) }
+    local -a fields=($rest)
+    [[ ${#fields[@]} -ge 20 && "${fields[0]}" != Z ]] || return 1
+    jq -cn --argjson pid "$pid" --argjson pgid "${fields[2]}" \
+        --arg starttime "${fields[19]}" --arg boot_id "$(< /proc/sys/kernel/random/boot_id)" \
+        '{pid:$pid,pgid:$pgid,starttime:$starttime,boot_id:$boot_id}'
+}
+
+identity_alive() { # path to child.json or supervisor identity object
+    local saved current pid
+    saved=$(jq -ec 'select(.pid|type=="number") | select(.pgid|type=="number") |
+        select(.pid>1 and .pgid>1 and .pid==.pgid) |
+        select(.starttime|type=="string" or type=="number") |
+        select(.boot_id|type=="string")' "$1" 2>/dev/null) || return 1
+    pid=$(jq -r .pid <<< "$saved")
+    current=$(process_identity "$pid") || return 1
+    jq -en --argjson a "$saved" --argjson b "$current" \
+        '$a.pid==$b.pid and $a.pgid==$b.pgid and ($a.starttime|tostring)==($b.starttime|tostring) and $a.boot_id==$b.boot_id' >/dev/null
+}
+
+process_matches() { # saved identity JSON, including starttime and boot id
+    local saved=$1 current pid
+    pid=$(jq -er 'select(.pid|type=="number") | .pid | select(.>1)' <<< "$saved" 2>/dev/null) || return 1
+    current=$(process_identity "$pid") || return 1
+    jq -en --argjson a "$saved" --argjson b "$current" \
+        '$a.pid==$b.pid and $a.pgid==$b.pgid and ($a.starttime|tostring)==($b.starttime|tostring) and $a.boot_id==$b.boot_id' >/dev/null
+}
+
+anchor_alive() { # saved identity JSON, not a re-read of a mutable job file
+    local saved=$1
+    jq -e 'select(.pid|type=="number") | select(.pgid|type=="number") |
+        select(.pid>1 and .pid==.pgid)' <<< "$saved" >/dev/null 2>&1 || return 1
+    process_matches "$saved"
+}
+
+group_has_members() { # group id, optional anchor pid to exclude; ignore reaped zombies
+    local pgid=$1 anchor=${2:-} file stat rest
+    for file in /proc/[0-9]*/stat; do
+        [[ -r "$file" ]] || continue
+        stat=$(< "$file") 2>/dev/null || continue
+        rest=${stat##*) }
+        local -a fields=($rest)
+        [[ ${fields[2]:-} == "$pgid" && ${fields[0]:-} != Z && ${file#/proc/} != "$anchor/stat" ]] && return 0
+    done
+    return 1
+}
+
+terminate_group() { # the supervisor holds the anchor across acknowledgment retries
+    local saved=$1 pgid anchor i held=''
+    [[ -f "$WORK_DIR/hold" ]] && anchor_alive "$saved" || return 1
+    for ((i=0; i<20; i++)); do
+        held=$(jq -ec . "$WORK_DIR/held" 2>/dev/null) || held=''
+        if [[ -n "$held" && "$held" == "$saved" ]] && anchor_alive "$saved"; then break; fi
+        anchor_alive "$saved" || break
+        sleep 0.1
+    done
+    if [[ -n "$held" && "$held" == "$saved" ]] && anchor_alive "$saved"; then
+        pgid=$(jq -r .pgid <<< "$saved")
+        anchor=$(jq -r .pid <<< "$saved")
+        kill -TERM -- "-$pgid" 2>/dev/null || true
+        for ((i=0; i<50; i++)); do
+            group_has_members "$pgid" "$anchor" || break
+            sleep 0.1
+        done
+        # The anchor cannot exit naturally while hold exists; KILL includes it.
+        kill -KILL -- "-$pgid" 2>/dev/null || true
+        for ((i=0; i<50; i++)); do
+            group_has_members "$pgid" || break
+            sleep 0.1
+        done
+        group_has_members "$pgid" && return 1
+        return 0
+    fi
+    return 1
+}
+
+supervisor_alive() {
+    local saved current pid
+    saved=$(jq -ec '.supervisor | select(.pid|type=="number") | select(.starttime|type=="string" or type=="number") |
+        select(.boot_id|type=="string")' "$1" 2>/dev/null) || return 1
+    pid=$(jq -r .pid <<< "$saved")
+    current=$(process_identity "$pid") || return 1
+    jq -en --argjson a "$saved" --argjson b "$current" \
+        '$a.pid==$b.pid and $a.pgid==$b.pgid and ($a.starttime|tostring)==($b.starttime|tostring) and $a.boot_id==$b.boot_id' >/dev/null
+}
+
+record_supervisor() {
+    local supervisor_pid=$BASHPID ident tmp
+    ident=$(process_identity "$supervisor_pid") || die 2 "cannot identify job supervisor"
+    tmp=$(mktemp "$WORK_DIR/.meta.XXXXXX")
+    jq --argjson supervisor "$ident" '.supervisor=$supervisor' "$WORK_DIR/meta.json" > "$tmp"
+    mv -f -- "$tmp" "$WORK_DIR/meta.json"
+}
+
+extract_findings() { # the last fenced block is authoritative, even if it is invalid
+    local report=$1 line block="" candidate="" in_block=false found=false
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^\`\`\`claudex-findings[[:space:]]*$ ]]; then
+            in_block=true block="" candidate="" found=false
+        elif [[ "$in_block" == true && "$line" =~ ^\`\`\`[[:space:]]*$ ]]; then
+            candidate=$block found=true in_block=false
+        elif [[ "$in_block" == true ]]; then
+            block+="$line"$'\n'
+        fi
+    done <<< "$report"
+    if [[ "$in_block" == true ]]; then
+        FINDINGS_ERROR="unterminated claudex-findings block"
+        return 0
+    fi
+    [[ "$found" == true ]] || return 0
+    local tmp
+    tmp=$(mktemp "$WORK_DIR/.findings.XXXXXX") || { FINDINGS_ERROR="cannot create findings file"; return; }
+    if ! jq -s -c -e 'length==1 and (.[0] | type=="array" and length<=50 and
+        (all(.[]; type=="object" and
+            (has("id") and has("severity") and has("title") and has("mechanism") and has("evidence") and has("fix") and has("unverified")) and
+            (.id|type=="string" and length<=16 and test("^F[0-9]+$")) and
+            (.severity|type=="string" and IN("critical","high","medium","low")) and
+            (.title|type=="string" and length<=200) and
+            (.mechanism|type=="string" and length<=2000) and
+            (.evidence|type=="string" and length<=2000) and
+            (.fix|type=="string" and length<=2000) and
+            (.unverified|type=="boolean"))) and
+        ([.[].id] | length== (unique|length)))' <<< "$candidate" >/dev/null 2>&1; then
+        FINDINGS_ERROR="invalid findings JSON, schema, bounds or duplicate ids"
+        rm -f -- "$tmp"
+        return
+    fi
+    if ! jq -s -c -e '.[0] | map({id,severity,title,mechanism,evidence,fix,unverified})' \
+        <<< "$candidate" > "$tmp" || (( $(wc -c < "$tmp") > 262144 )); then
+        FINDINGS_ERROR="findings exceed 256 KiB or could not be serialized"
+        rm -f -- "$tmp"
+        return
+    fi
+    mv -f -- "$tmp" "$WORK_DIR/findings.json"
+}
+
+publish_on_exit() {
+    local status=$1
+    trap - EXIT
+    [[ -n "${WORK_DIR:-}" && -d "$WORK_DIR" && ! -f "$WORK_DIR/rc" ]] || return 0
+    if [[ -n "${ACTIVE_WORKER_PID:-}" ]]; then
+        : | atomic_file "$WORK_DIR/stop" || true
+        supervise_worker || true
+        ACTIVE_WORKER_PID=''
+    fi
+    if [[ "${WORK_LOCK_HELD:-}" != true ]]; then
+        exec {LOCK_FD}> "$WORK_DIR/lock" || return 0
+        flock "$LOCK_FD" || return 0
+        WORK_LOCK_HELD=true
+    fi
+    if [[ ! -f "$WORK_DIR/rc" ]]; then
+        if [[ -n "${WORK_OUT_TMP:-}" && -f "$WORK_OUT_TMP" ]]; then
+            mv -f -- "$WORK_OUT_TMP" "$WORK_DIR/out" || true
+        fi
+        if [[ -n "${WORK_ERR_TMP:-}" && -f "$WORK_ERR_TMP" ]]; then
+            mv -f -- "$WORK_ERR_TMP" "$WORK_DIR/err" || true
+        fi
+        if [[ ! -s "$WORK_DIR/out" ]]; then
+            if [[ -s "$WORK_DIR/err" ]]; then
+                atomic_file "$WORK_DIR/out" < "$WORK_DIR/err" || true
+            else
+                printf 'claudex-worker: job failed before producing a report (exit %s)\n' "$status" | atomic_file "$WORK_DIR/out" || true
+            fi
+        fi
+        [[ -f "$WORK_DIR/err" ]] || : | atomic_file "$WORK_DIR/err" || true
+        [[ "$status" -ne 0 ]] || status=1
+        [[ -z "${WORK_SIGNAL_RC:-}" ]] || status=$WORK_SIGNAL_RC
+        [[ ! -f "$WORK_DIR/cancelled" ]] || status=130
+        printf '%s\n' "$status" | atomic_file "$WORK_DIR/rc" || true
+    fi
+    flock -u "$LOCK_FD"
+    exec {LOCK_FD}>&-
+    WORK_LOCK_HELD=false
+}
+
+install_job_guard() {
+    trap 'publish_on_exit $?' EXIT
+    trap 'signal_supervisor TERM' TERM
+    trap 'signal_supervisor INT' INT
+    trap 'signal_supervisor HUP' HUP
+}
+
+signal_supervisor() {
+    : | atomic_file "$WORK_DIR/stop" || true
+    WORK_STOPPING=true
+    WORK_SIGNAL_RC=143
+}
+
+supervise_worker() {
+    local saved='' hold_owner='' worker_rc=0
+    while [[ -n "${ACTIVE_WORKER_IDENT:-}" ]] && process_matches "$ACTIVE_WORKER_IDENT"; do
+        if [[ -f "$WORK_DIR/stop" ]]; then
+            if [[ -f "$WORK_DIR/go" ]]; then
+                if [[ -z "$hold_owner" ]]; then
+                    saved=$(jq -ec . "$WORK_DIR/child.json" 2>/dev/null) || saved=''
+                    if [[ -n "$saved" ]] && anchor_alive "$saved"; then
+                        if [[ -f "$WORK_DIR/hold" ]]; then
+                            hold_owner=$saved
+                        else
+                            rm -f -- "$WORK_DIR/held"
+                            if : | atomic_file "$WORK_DIR/hold"; then hold_owner=$saved; fi
+                        fi
+                    fi
+                fi
+                if [[ -n "$hold_owner" ]]; then
+                    if ! anchor_alive "$hold_owner" || terminate_group "$hold_owner"; then
+                        rm -f -- "$WORK_DIR/hold" "$WORK_DIR/held"
+                        hold_owner=''
+                    fi
+                fi
+            fi
+        elif [[ ! -f "$WORK_DIR/go" && -f "$WORK_DIR/child.json" ]]; then
+            # Serialize the go decision with CLI cancel and the anchor registration.
+            exec {GO_FD}> "$WORK_DIR/lock" || return 1
+            flock "$GO_FD" || return 1
+            if [[ ! -f "$WORK_DIR/stop" && ! -f "$WORK_DIR/go" ]]; then
+                saved=$(jq -ec . "$WORK_DIR/child.json" 2>/dev/null) || saved=''
+                if [[ -n "$saved" ]] && anchor_alive "$saved"; then
+                    : | atomic_file "$WORK_DIR/go" || : | atomic_file "$WORK_DIR/stop"
+                fi
+            fi
+            flock -u "$GO_FD"
+            exec {GO_FD}>&-
+        fi
+        sleep 0.1
+    done
+    if [[ -n "$hold_owner" ]] && ! anchor_alive "$hold_owner"; then
+        rm -f -- "$WORK_DIR/hold" "$WORK_DIR/held"
+    fi
+    wait "$ACTIVE_WORKER_PID" || worker_rc=$?
+    WORKER_RC=$worker_rc
+}
+
+cmd_run() {
+    local adopted=false
+    if [[ -n "${CLAUDEX_JOB_ID:-}" ]]; then
+        jobs_root
+        [[ "$CLAUDEX_JOB_ID" =~ ^[0-9]+-[0-9a-f]{8}$ ]] || die 2 "invalid CLAUDEX_JOB_ID"
+        WORK_DIR=$(job_dir "$CLAUDEX_JOB_ID") WORK_ID=$CLAUDEX_JOB_ID
+        [[ -f "$WORK_DIR/brief" && -f "$WORK_DIR/meta.json" ]] || die 2 "no such job"
+        WORK_TIER=$(jq -r .tier "$WORK_DIR/meta.json")
+        adopted=true
+    else
+        preflight "$@"
+        new_job
+    fi
+    record_supervisor
+    WORK_RAW="$WORK_DIR/.raw.$$"
+    local out_tmp err_tmp rc=0 session report
+    out_tmp=${WORK_OUT_TMP:-}
+    err_tmp=${WORK_ERR_TMP:-}
+    [[ -n "$out_tmp" ]] || out_tmp=$(mktemp "$WORK_DIR/.out.XXXXXX")
+    [[ -n "$err_tmp" ]] || err_tmp=$(mktemp "$WORK_DIR/.err.XXXXXX")
+    WORK_OUT_TMP=$out_tmp WORK_ERR_TMP=$err_tmp
+    if [[ "$adopted" == true ]]; then
+        ( preflight "$@"; run_worker ) <<< "$(< "$WORK_DIR/brief")" > "$out_tmp" 2> "$err_tmp" &
+    else
+        ( run_worker ) > "$out_tmp" 2> "$err_tmp" &
+    fi
+    ACTIVE_WORKER_PID=$!
+    ACTIVE_WORKER_IDENT=$(process_identity "$ACTIVE_WORKER_PID") || ACTIVE_WORKER_IDENT=''
+    supervise_worker
+    rc=$WORKER_RC
+    ACTIVE_WORKER_PID='' ACTIVE_WORKER_IDENT=''
+    [[ -z "${WORK_SIGNAL_RC:-}" ]] || rc=$WORK_SIGNAL_RC
+    session=$(jq -r '.session_id // empty' "$WORK_RAW" 2>/dev/null) || session=""
+    report=$(jq -r '.result // empty' "$WORK_RAW" 2>/dev/null) || report=""
+    FINDINGS_ERROR=""
+    if [[ "$WORK_TIER" == adversary ]]; then extract_findings "$report"; fi
+    exec {LOCK_FD}> "$WORK_DIR/lock"
+    flock "$LOCK_FD"
+    WORK_LOCK_HELD=true
+    [[ -z "${WORK_SIGNAL_RC:-}" ]] || rc=$WORK_SIGNAL_RC
+    [[ ! -f "$WORK_DIR/cancelled" ]] || rc=130
+    mv -f -- "$out_tmp" "$WORK_DIR/out"
+    mv -f -- "$err_tmp" "$WORK_DIR/err"
+    printf '%s\n' "$session" | atomic_file "$WORK_DIR/session"
+    if [[ -n "$FINDINGS_ERROR" ]]; then
+        local tmp; tmp=$(mktemp "$WORK_DIR/.meta.XXXXXX")
+        jq --arg error "$FINDINGS_ERROR" '.findings_error=$error' "$WORK_DIR/meta.json" > "$tmp"
+        mv -f -- "$tmp" "$WORK_DIR/meta.json"
+    fi
+    printf '%s\n' "$rc" | atomic_file "$WORK_DIR/rc"
+    flock -u "$LOCK_FD"
+    exec {LOCK_FD}>&-
+    WORK_LOCK_HELD=false
+    rm -f -- "$WORK_RAW" "$WORK_RAW.err"
+    if [[ -n "${WORK_OUTPUT_FD:-}" ]]; then
+        exec 1>&"$WORK_OUTPUT_FD" 2>&"$WORK_ERROR_FD"
+        exec {WORK_OUTPUT_FD}>&- {WORK_ERROR_FD}>&-
+    fi
+    cat "$WORK_DIR/out"; cat "$WORK_DIR/err" >&2
+    return "$rc"
+}
+
+cmd_start() {
+    preflight "$@"
+    new_job
+    local job=$WORK_ID dir=$WORK_DIR
+    ( CLAUDEX_JOB_ID="$job" "$0" run "$@" < "$dir/brief" > /dev/null 2>&1 || : ) > /dev/null 2>&1 < /dev/null &
+    trap - EXIT TERM INT HUP
+    disown
+    local i
+    for ((i=0; i<100; i++)); do
+        if jq -e '.supervisor != null' "$dir/meta.json" >/dev/null 2>&1 || [[ -f "$dir/rc" ]]; then
+            printf '%s\n' "$job"
+            return 0
+        fi
+        sleep 0.05
+    done
+    die 2 "job supervisor did not register: $job"
+}
+
+cmd_admit() {
+    [[ $# -eq 3 && "$2" == --running && "$3" =~ ^[0-9]+$ ]] || die 2 "usage: claudex-worker admit TIER --running N (N must be a non-negative integer)"
+    WORK_EFFORT='' WORK_MODE=''
+    check_worker_tier "$1"
+    [[ "$WORK_TIER" != adversary ]] || die 2 "admit requires luna, terra, sol or astra"
+
+    local running=$3 max=${CFG[CLAUDEX_MAX_PARALLEL]} count=0 total dir id state
+    running=${running#"${running%%[!0]*}"}
+    [[ -n "$running" ]] || running=0
+    jobs_root
+    for dir in "$STATE_DIR"/jobs/*; do
+        [[ -e "$dir" || -L "$dir" ]] || continue
+        id=${dir##*/}
+        state=$(job_entry "$id" | jq -r .state)
+        [[ "$state" == running ]] && count=$((count+1))
+    done
+    if (( ${#running} > ${#max} )); then
+        total=$running
+    else
+        total=$((10#$running + count))
+    fi
+    if (( ${#running} > ${#max} || total >= max )); then
+        printf 'claudex: %s GPT agents/workers already running (CLAUDEX_MAX_PARALLEL=%s)\n' "$total" "$max" >&2
+        return 4
+    fi
+}
+
+# A step has no job or slot: agent admission has already counted this caller.
+step_stream() {
+    local line status=0 headers=false payload
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line=${line%$'\r'}
+        if [[ "$line" =~ ^HTTP/[0-9.]+[[:space:]]+([0-9]{3}) ]]; then
+            status=${BASH_REMATCH[1]}
+            headers=true
+        elif [[ "$headers" == true ]]; then
+            [[ -n "$line" ]] || headers=false
+        elif (( status >= 400 )); then
+            printf '%s\n' "$line" >&2
+        elif [[ "$line" == data:* ]]; then
+            payload=${line#data:}
+            payload=${payload# }
+            [[ "$payload" == '[DONE]' ]] || printf '%s\n' "$payload"
+        fi
+    done
+    (( status < 400 ))
+}
+
+step_cancel() {
+    [[ -z "${STEP_CURL_PID:-}" ]] || kill "$STEP_CURL_PID" 2>/dev/null || true
+    rm -f -- "${STEP_INPUT:-}" "${STEP_REQUEST:-}"
+    exit "$1"
+}
+
+cmd_step() {
+    [[ $# -ge 1 ]] || die 2 "usage: claudex-worker step TIER [--effort E] < request.json"
+    WORK_EFFORT='' WORK_MODE=''
+    local tier=$1; shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --effort)
+                [[ $# -ge 2 && -n "$2" ]] || die 2 "missing value for --effort"
+                WORK_EFFORT=$2; shift 2 ;;
+            *) die 2 "unknown option: $1" ;;
+        esac
+    done
+    check_worker_tier "$tier"
+    [[ "$WORK_TIER" != adversary ]] || die 2 "step requires luna, terra, sol or astra"
+    [[ -z "$WORK_EFFORT" || "$WORK_EFFORT" =~ ^(low|medium|high|xhigh|max|ultra)$ ]] || die 2 "invalid effort '$WORK_EFFORT'"
+    local model=$WORK_SLUG
+    [[ -z "$WORK_EFFORT" ]] || model+="@$WORK_EFFORT"
+
+    mkdir -p "$STATE_DIR"
+    STEP_INPUT='' STEP_REQUEST='' STEP_CURL_PID=''
+    STEP_INPUT=$(mktemp "$STATE_DIR/.step-input.XXXXXX") || die 2 "cannot create step input"
+    trap 'rm -f -- "${STEP_INPUT:-}" "${STEP_REQUEST:-}"' EXIT
+    trap 'step_cancel 143' TERM
+    trap 'step_cancel 130' INT
+    trap 'step_cancel 129' HUP
+    STEP_REQUEST=$(mktemp "$STATE_DIR/.step-request.XXXXXX") || die 2 "cannot create step request"
+    head -c $((32 * 1024 * 1024 + 1)) > "$STEP_INPUT"
+    (( $(wc -c < "$STEP_INPUT") <= 32 * 1024 * 1024 )) || die 2 "request too large"
+    jq -sec --arg model "$model" \
+        'if length==1 and (.[0] | type)=="object" then .[0] | .model=$model | .stream=true else empty end' \
+        "$STEP_INPUT" > "$STEP_REQUEST" 2>/dev/null && [[ -s "$STEP_REQUEST" ]] || die 2 "request must be a JSON object"
+
+    ensure_proxy
+    token_preflight
+    local step_fd stream_rc=0 curl_rc=0
+    exec {step_fd}< <(curl -N -sS -i -H 'content-type: application/json' -H 'authorization: Bearer claudex-local' \
+        --data-binary @"$STEP_REQUEST" "http://127.0.0.1:$PORT/v1/messages")
+    STEP_CURL_PID=$!
+    step_stream <&"$step_fd" || stream_rc=$?
+    exec {step_fd}<&-
+    wait "$STEP_CURL_PID" || curl_rc=$?
+    STEP_CURL_PID=''
+    (( stream_rc == 0 && curl_rc == 0 )) && return 0
+    return 7
+}
+
+job_entry() {
+    local id=$1 dir meta='{}' rc=null state=lost session=null elapsed=null started=null found=false legacy=true
+    dir=$(job_dir "$id")
+    if [[ ! -d "$dir" ]]; then state=missing legacy=false found=null
+    else
+        if [[ -f "$dir/meta.json" ]]; then
+            meta=$(jq -c 'if type=="object" then . else {} end' "$dir/meta.json" 2>/dev/null) || meta='{}'
+            legacy=false
+            started=$(jq -r '.started // empty' <<< "$meta")
+            [[ "$started" =~ ^[0-9]+$ ]] || started=null
+        fi
+        if [[ -f "$dir/rc" ]]; then
+            rc=$(< "$dir/rc")
+            [[ "$rc" =~ ^[0-9]+$ ]] || rc=1
+            if [[ "$rc" == 130 && -f "$dir/cancelled" ]]; then state=cancelled
+            elif [[ "$rc" == 0 ]]; then state=done
+            else state=failed; fi
+            [[ "$started" == null ]] || elapsed=$(( $(stat -c %Y "$dir/rc") - started ))
+        elif identity_alive "$dir/child.json" || supervisor_alive "$dir/meta.json" ||
+             [[ "$started" != null && $(( $(date +%s) - started )) -lt 30 && "$(jq -r '.supervisor' <<< "$meta")" == null ]]; then
+            state=running
+            [[ "$started" == null ]] || elapsed=$(( $(date +%s) - started ))
+        else
+            [[ "$started" == null ]] || elapsed=$(( $(date +%s) - started ))
+        fi
+        [[ "$elapsed" == null || "$elapsed" -ge 0 ]] || elapsed=0
+        if [[ -f "$dir/session" ]]; then session=$(jq -Rn --arg s "$(< "$dir/session")" '$s | select(length>0)'); [[ -n "$session" ]] || session=null; fi
+        [[ ! -f "$dir/findings.json" ]] || found=true
+    fi
+    jq -cn --argjson meta "$meta" --arg id "$id" --arg state "$state" \
+        --argjson started "$started" --argjson elapsed "$elapsed" --argjson rc "$rc" \
+        --argjson session "$session" --argjson found "$found" --argjson legacy "$legacy" \
+        '{id:$id,tier:($meta.tier // null),kind:($meta.kind // null),model:($meta.model // null),
+          mode:($meta.mode // null),cwd:($meta.cwd // null),origin:($meta.origin // null),
+          owner:($meta.owner // null),state:$state,started:$started,elapsed_s:$elapsed,
+          rc:$rc,session:$session,has_findings:$found,findings_error:($meta.findings_error // null),legacy:$legacy}'
+}
+
+cmd_jobs() {
+    local json=false limit=20 has_ids=false owner='' id dir local_path listing
+    local -a ids=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            --limit) [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || die 2 "invalid jobs limit"; limit=$2; shift 2 ;;
+            --id) [[ $# -ge 2 ]] || die 2 "missing job id"; ids+=("$2"); has_ids=true; shift 2 ;;
+            --owner) [[ $# -ge 2 && -n "$2" ]] || die 2 "missing job owner"; owner=$2; shift 2 ;;
+            *) die 2 "unknown jobs option: $1" ;;
+        esac
+    done
+    jobs_root
+    if [[ -n "$owner" ]]; then
+        [[ "$json" == true && "$has_ids" == false ]] || die 2 "--owner requires --json without --id"
+        limit=500
+    fi
+    if [[ "$has_ids" == false ]]; then
+        listing=$(for dir in "$STATE_DIR"/jobs/*; do
+            [[ -e "$dir" || -L "$dir" ]] || continue
+            dir=$(job_dir "${dir##*/}")
+            if [[ -n "$owner" ]]; then
+                [[ -f "$dir/meta.json" ]] || continue
+                jq -e --arg owner "$owner" '.owner == $owner' "$dir/meta.json" >/dev/null 2>&1 || continue
+            fi
+            local_path=$dir
+            [[ ! -f "$dir/brief" ]] || local_path="$dir/brief"
+            printf '%s\t%s\n' "$(stat -c %y "$local_path")" "${dir##*/}"
+        done)
+        if (( limit > 0 )); then
+            while IFS= read -r id; do
+                [[ -n "$id" ]] || continue
+                ids+=("$id")
+                (( ${#ids[@]} < limit )) || break
+            done < <(printf '%s\n' "$listing" | sort -r | while IFS= read -r id; do
+                printf '%s\n' "${id##*$'\t'}"
+            done)
+        fi
+    fi
+    if [[ "$json" == true ]]; then
+        for id in "${ids[@]}"; do job_entry "$id"; done | jq -sc '.'
+    else
+        for id in "${ids[@]}"; do job_entry "$id" | jq -r '[.id,.tier // "-",.state] | join(" ")'; done
+    fi
+}
+
+cmd_cancel() {
+    [[ $# -eq 1 ]] || die 2 "usage: claudex-worker cancel JOB"
+    local dir saved='' requested=false i
+    jobs_root
+    dir=$(job_dir "$1")
+    [[ -d "$dir" ]] || die 2 "no such running job"
+    exec {LOCK_FD}> "$dir/lock"
+    flock "$LOCK_FD"
+    if [[ ! -f "$dir/rc" ]]; then
+        if [[ -e "$dir/child.json" ]]; then
+            saved=$(jq -ec . "$dir/child.json" 2>/dev/null) || saved=''
+            anchor_alive "$saved" && requested=true
+        elif supervisor_alive "$dir/meta.json"; then
+            requested=true
+        fi
+    fi
+    if [[ "$requested" == true ]]; then
+        : | atomic_file "$dir/cancelled"
+        : | atomic_file "$dir/stop"
+    fi
+    flock -u "$LOCK_FD"
+    exec {LOCK_FD}>&-
+    [[ "$requested" == true ]] || die 2 "job is not running: $1"
+    for ((i=0; i<100; i++)); do
+        [[ ! -f "$dir/rc" ]] || { printf 'cancelled %s\n' "$1"; return 0; }
+        sleep 0.1
+    done
+    printf 'cancel requested %s (still stopping)\n' "$1"
+}
+
+cmd_findings() {
+    [[ $# -eq 1 ]] || die 2 "usage: claudex-worker findings JOB"
+    jobs_root
+    local dir; dir=$(job_dir "$1")
+    [[ -f "$dir/findings.json" ]] || return 1
+    cat "$dir/findings.json"
+}
+
+cmd_wait() {
+    [[ $# -ge 1 ]] || die 2 "usage: claudex-worker wait JOB [--timeout SECONDS]"
+    jobs_root
+    local dir timeout=540; dir=$(job_dir "$1"); shift
+    if [[ "${1:-}" == --timeout ]]; then
+        [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || die 2 "invalid timeout"
+        timeout=$2; shift 2
+    fi
+    [[ $# -eq 0 ]] || die 2 "unknown wait option: $1"
+    [[ -d "$dir" ]] || die 2 "no such job"
+    local deadline=$(( $(date +%s) + timeout ))
+    while [[ ! -f "$dir/rc" ]]; do
+        (( $(date +%s) >= deadline )) && { echo "still running; call wait again" >&2; exit 5; }
+        sleep 0.5
+    done
+    [[ ! -f "$dir/out" ]] || cat "$dir/out"
+    [[ ! -f "$dir/err" ]] || cat "$dir/err" >&2
+    exit "$(< "$dir/rc")"
+}
+
+cmd_result() {
+    [[ $# -eq 1 ]] || die 2 "usage: claudex-worker result JOB"
+    jobs_root
+    local dir; dir=$(job_dir "$1")
+    [[ -f "$dir/out" ]] || die 2 "no such job"
+    cat "$dir/out"
+}
+
+usage() {
+    cat >&2 <<EOF
+claudex-worker $VERSION
+  run TIER [--cwd DIR] [--effort E] [--mode read|edit|yolo] [--max-turns N] [--resume UUID] < brief
+  resume SESSION_ID TIER [options] < brief       follow-up
+  start TIER [same options] < brief               supervised background job
+  step TIER [--effort E] < request.json           stream proxy SSE as NDJSON
+  admit TIER --running N                          check agent/worker capacity
+  jobs [--json] [--limit N] [--id JOB]... [--owner OWNER] | cancel JOB | findings JOB
+  wait JOB [--timeout S] | result JOB
+  config | set KEY VALUE | policy-line | status [--json] | stop-proxy
+  proxy-exec                                 run the proxy in the foreground (for systemd/OpenRC)
+TIER: luna, terra, sol, astra, or adversary (read-only, uses CLAUDEX_ADVERSARY_MODEL)
+EOF
+    exit 2
+}
+
+main() {
+    [[ $# -ge 1 ]] || usage
+    local cmd=$1; shift
+    if [[ "$cmd" == run && -n "${CLAUDEX_JOB_ID:-}" ]]; then
+        [[ "$CLAUDEX_JOB_ID" =~ ^[0-9]+-[0-9a-f]{8}$ ]] || die 2 "invalid CLAUDEX_JOB_ID"
+        jobs_root
+        WORK_DIR=$(job_dir "$CLAUDEX_JOB_ID")
+        [[ -d "$WORK_DIR" ]] || die 2 "no such job"
+        install_job_guard
+        WORK_OUT_TMP=$(mktemp "$WORK_DIR/.out.XXXXXX")
+        WORK_ERR_TMP=$(mktemp "$WORK_DIR/.err.XXXXXX")
+        exec {WORK_OUTPUT_FD}>&1 {WORK_ERROR_FD}>&2
+        exec >> "$WORK_OUT_TMP" 2>> "$WORK_ERR_TMP"
+    fi
+    load_policy
+    case "$cmd" in
+        run)         cmd_run "$@" ;;
+        resume)      cmd_resume "$@" ;;
+        start)       cmd_start "$@" ;;
+        step)        cmd_step "$@" ;;
+        admit)       cmd_admit "$@" ;;
+        jobs)        cmd_jobs "$@" ;;
+        cancel)      cmd_cancel "$@" ;;
+        findings)    cmd_findings "$@" ;;
+        wait)        cmd_wait "$@" ;;
+        result)      cmd_result "$@" ;;
+        config)      cmd_config ;;
+        set)         cmd_set "$@" ;;
+        policy-line) cmd_policy_line ;;
+        status)      cmd_status "$@" ;;
+        stop-proxy)  cmd_stop_proxy ;;
+        proxy-exec)  cmd_proxy_exec ;;
+        --version)   echo "claudex-worker $VERSION" ;;
+        *)           usage ;;
+    esac
+}
+main "$@"

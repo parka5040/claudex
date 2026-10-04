@@ -1,0 +1,6 @@
+build/
+*.o
+spikes/raw/
+*.capture
+.cache/
+plugin/.claude-plugin/types/

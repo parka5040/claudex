@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "lib": ["es2023"],
+    "types": ["../../plugin/types/index.d.ts"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "jsx": "react",
+    "jsxFactory": "h",
+    "jsxFragmentFactory": "Fragment"
+  },
+  "imports": {
+    "claude-code": "../../.cache/mods-api/claude-code.d.ts"
+  }
+}

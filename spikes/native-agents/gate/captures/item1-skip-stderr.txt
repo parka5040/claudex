@@ -1,0 +1,2 @@
+[claude-code:unrecognized_model] {"model":"gpt-6-luna","query_source":"sdk"}
+[claude-code:unrecognized_model] {"model":"gpt-sol","query_source":"agent:custom:gate:gpt"}

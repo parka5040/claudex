@@ -1,0 +1,4 @@
+Foreground run, observed immediately after completion before later runs reused marker names:
+started.timestamp to finally.timestamp = 225.012 seconds; agent ids matched.
+Retained machine-generated evidence: b-foreground-output.txt duration_ms=228563, is_error=false, num_turns=2, total_cost_usd=0; b-foreground-transcript.txt contains the complete 454-character synthetic text with t=225s final line.
+Ticker emitted at 0,15,30,45,60,135,150,165,180,195,210,225 seconds, with 75 seconds between t=60 and t=135.

@@ -1,0 +1,12 @@
+{"models":[
+{"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol","priority":1,"visibility":"list","supported_in_api":true},
+{"slug":"gpt-6-astra","display_name":"GPT-6-Astra","priority":2,"visibility":"list","supported_in_api":true},
+{"slug":"gpt-6-sol","display_name":"GPT-6-Sol","priority":3,"visibility":"list","supported_in_api":true},
+{"slug":"gpt-6-luna","display_name":"GPT-6-Luna","priority":4,"visibility":"list","supported_in_api":true},
+{"slug":"gpt-reserve","display_name":"GPT-Reserve","priority":4,"visibility":"hide","supported_in_api":true},
+{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","priority":5,"visibility":"list","supported_in_api":true},
+{"slug":"gpt-5.6-terra","display_name":"GPT-5.6-Terra","priority":8,"visibility":"list","supported_in_api":true},
+{"slug":"gpt-5.6-luna","display_name":"GPT-5.6-Luna","priority":9,"visibility":"list","supported_in_api":true},
+{"slug":"gpt-5.5","display_name":"GPT-5.5","priority":13,"visibility":"list","supported_in_api":true},
+{"slug":"codex-auto-review","display_name":"Codex Auto Review","priority":43,"visibility":"hide","supported_in_api":true}
+]}

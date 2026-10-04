@@ -1,0 +1,16 @@
+{
+  "name": "claudex",
+  "description": "Opt-in GPT layer for Claude Code: GPT-6 and GPT-5.6 models as worker subagents and as an adversarial reviewer, via a local sidecar proxy. Claude-native behaviour is untouched; nothing GPT happens unless the user asks.",
+  "version": "0.3.0",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "parka5040"
+  },
+  "license": "MIT",
+  "keywords": [
+    "gpt",
+    "subagents",
+    "adversarial-review",
+    "delegation"
+  ]
+}

@@ -1,0 +1,34 @@
+#!/usr/bin/openrc-run
+# OpenRC USER service for the claudex proxy (OpenRC >= 0.60, `rc-service --user`).
+# Install with: service/install.sh install
+# (or copy to ~/.config/rc/init.d/claudex-proxy, then
+#  `rc-update --user add claudex-proxy default && rc-service --user claudex-proxy start`).
+#
+# It must run as you, not as root: it reads your ~/.codex/auth.json (read-only).
+# Optional overrides go in ~/.config/rc/conf.d/claudex-proxy: CLAUDEX_WORKER, CLAUDEX_LOG.
+
+supervisor=supervise-daemon
+description="claudex proxy (GPT workers for Claude Code; loopback only)"
+
+: "${CLAUDEX_WORKER:=${HOME}/.local/bin/claudex-worker}"
+: "${CLAUDEX_LOG:=${XDG_STATE_HOME:-${HOME}/.local/state}/claudex/proxy.log}"
+
+# proxy-exec writes the identity nonce workers check, then execs claudex-proxy in the foreground.
+command="${CLAUDEX_WORKER}"
+command_args="proxy-exec"
+output_log="${CLAUDEX_LOG}"
+error_log="${CLAUDEX_LOG}"
+umask=077
+
+# Give up instead of spinning if it cannot stay up (e.g. the port is held by something else).
+respawn_delay=2
+respawn_max=5
+respawn_period=60
+
+start_pre() {
+    if [ ! -x "${CLAUDEX_WORKER}" ]; then
+        eerror "${CLAUDEX_WORKER} not found; run 'make install' in the claudex repo"
+        return 1
+    fi
+    mkdir -p "$(dirname "${CLAUDEX_LOG}")"
+}

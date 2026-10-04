@@ -1,0 +1,32 @@
+# systemd USER unit for the claudex proxy.  Install with: service/install.sh install
+# (or copy to ~/.config/systemd/user/ and `systemctl --user enable --now claudex-proxy`).
+#
+# STATUS: passes `systemd-analyze --user verify` (systemd 261) but is NOT runtime-tested: it was written
+# on an OpenRC machine. Try it on a real systemd host before relying on it.
+#
+# It must run as you, not as root: it reads your ~/.codex/auth.json (read-only).
+# To keep it running while you are logged out: `loginctl enable-linger $USER`.
+[Unit]
+Description=claudex proxy (GPT workers for Claude Code; loopback only)
+
+[Service]
+Type=exec
+# proxy-exec writes the identity nonce workers check, then execs claudex-proxy in the foreground.
+ExecStart=%h/.local/bin/claudex-worker proxy-exec
+# always: a supervisor that respawns on any exit, like OpenRC's supervise-daemon. An explicit
+# `systemctl --user stop` is still honoured.
+Restart=always
+RestartSec=2
+# 6 = the port is held by something that is not ours, or claudex-proxy is not installed;
+# 2 = bad configuration. Restarting cannot fix either.
+RestartPreventExitStatus=2 6
+UMask=0077
+SyslogIdentifier=claudex-proxy
+# The proxy confines itself (Landlock + seccomp, non-dumpable) and refuses to start if it
+# cannot. Only add hardening here that works in an unprivileged user manager.
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+
+[Install]
+WantedBy=default.target

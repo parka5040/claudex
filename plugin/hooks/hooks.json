@@ -1,0 +1,17 @@
+{
+  "modules": ["./register.ts"],
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/claudex-worker\" policy-line",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

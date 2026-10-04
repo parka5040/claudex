@@ -1,0 +1,1 @@
+{"models":[{"slug":"gpt-6-luna","display_name":"Luna","priority":3,"visibility":"hide","supported_in_api":true},{"slug":"gpt-6-sol","display_name":"Sol","priority":2,"visibility":"list","supported_in_api":false}]}

@@ -1,0 +1,6 @@
+2026-10-03, curl through stdin --config - with honest originator: claude-code, UA: claudex/0.1 (Claude Code; third-party harness)
+GET https://chatgpt.com/backend-api/codex/models?client_version=0.160.0 => HTTP 200, {"models":[10 records]}
+POST https://chatgpt.com/backend-api/codex/responses model gpt-6.1-sol => HTTP 200, response.output_text.done="hello"
+POST https://chatgpt.com/backend-api/codex/responses model gpt-6.1-luna => HTTP 400, "The 'gpt-6.1-luna' model is not supported when using Codex with a ChatGPT account."
+POST https://chatgpt.com/backend-api/codex/responses model gpt-6.1-astra => HTTP 400, "The 'gpt-6.1-astra' model is not supported when using Codex with a ChatGPT account."
+No model probe was repeated.

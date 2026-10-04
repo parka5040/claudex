@@ -1,0 +1,8 @@
+{
+  "name": "claudex-local",
+  "owner": { "name": "parka5040" },
+  "description": "Local marketplace for the claudex plugin (this repository).",
+  "plugins": [
+    { "name": "claudex", "source": "./plugin", "description": "Opt-in GPT worker and adversary layer for Claude Code." }
+  ]
+}
