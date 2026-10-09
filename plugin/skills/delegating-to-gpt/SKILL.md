@@ -1,6 +1,6 @@
 ---
 name: delegating-to-gpt
-description: Use when the user asks for GPT, Astra, Sol, Terra, Luna, "claudex", a GPT worker or subagent, a second opinion from another model, or an adversarial review of a plan or diff - or when the session-start line "claudex (GPT layer) is ON" is present and you are deciding whether another model may be used
+description: Use when the user asks for GPT, Astra, Sol, Terra, Luna, "claudex", a GPT worker or subagent, a second opinion from another model, or an adversarial or architectural review of a plan, design or diff - or when the session-start line "claudex (GPT layer) is ON" is present and you are deciding whether another model may be used
 ---
 
 # Delegating to GPT (claudex)
@@ -16,7 +16,7 @@ Dispatch work with the **Agent tool**, `subagent_type: "claudex:gpt-<tier>"` (lu
 astra). Run in the background by default; the Agent tool's task notification delivers the
 result. Give the agent a complete, self-contained brief: goal, exact paths, constraints,
 done-criteria and verification command. The agent has the spawn prompt and its session's files,
-not this conversation. For adversarial reviews, use `mcp__claudex__review`.
+not this conversation. For adversarial and architectural reviews, use `mcp__claudex__review`.
 
 Answer every adversarial finding with `mcp__claudex__verdict`, naming its review and round.
 Unresolved findings go to the user through the findings pane. Do not settle them yourself.
@@ -45,11 +45,11 @@ workers. If blocked, report it to the user; do not work around it.
 
 | TIER | Use for |
 |---|---|
-| `luna` | bulk mechanical edits from an exact spec; extraction; classification |
-| `sol` | complex multi-file implementation and debugging; default worker |
-| `astra` | hardest problems; peer-level second opinion |
+| `luna` | extraction, classification and summaries; not for writing code |
+| `sol` | all code writing: implementation, tests, refactors, mechanical edits, debugging; default worker |
+| `astra` | architectural review and peer-level second opinions; not for writing code |
 
-`terra` is deprecated and served by sol. Choose `sol` for new work. The adversary is a
+`terra` is deprecated and served by sol. Send every code-writing task to `sol`, even a mechanical one; brief `astra` to review, not to edit files. The adversary is a
 separate read-only review using `CLAUDEX_ADVERSARY_MODEL` (default `gpt-astra@xhigh`), not a
 `claudex:gpt-adversary` agent.
 
@@ -90,10 +90,15 @@ workers cannot edit. A headless worker's explicit `--mode yolo` has no confineme
 the user's explicit request. Native GPT agents use the claudex confinement described above,
 not these child permission settings.
 
-## Adversarial review
+## Adversarial and architectural review
 
 Send the artifact (plan text, `git diff`, design doc) and neutral context. Leave out your reasoning
 for it and how confident you are. Ask for: severity, mechanism, evidence as `path:line` or a command,
 and `UNVERIFIED` on anything it could not confirm. Then answer every finding to the user: accepted
 (and what changed), rebutted (with evidence), or **unresolved**. Unresolved disagreements between you
 and a peer-level model go to the user to decide; do not settle them yourself.
+
+An architectural review uses the same review tool. Put the design, plan or relevant code paths in the
+artifact and say in the context that the review is architectural: module boundaries, interfaces,
+coupling, data flow, failure modes and migration risk. For a free-form second opinion instead of
+findings, dispatch `claudex:gpt-astra` with a brief that says not to edit files.

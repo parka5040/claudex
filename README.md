@@ -68,6 +68,12 @@ requests (which name Claude models) go to luna at low effort.
 
 ## Control
 
+Roles: sol writes all code (implementation, tests, refactors, mechanical edits, debugging) and
+is the default worker. Astra reviews: the adversary (`gpt-astra@xhigh` by default, through
+`mcp__claudex__review`) handles adversarial and architectural reviews, and `claudex:gpt-astra`
+gives peer-level second opinions; neither writes code. Luna handles extraction, classification
+and summaries, and serves headless workers' background requests.
+
 Precedence: what you say in the conversation > slash command > environment > config file > defaults.
 
 | Key (`~/.config/claudex/config`, or env) | Values (default first) |

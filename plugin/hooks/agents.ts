@@ -13,9 +13,9 @@ export type ClaudexAgent = {
 export const AGENT_PREFIX = 'claudex:gpt-'
 const tiers: Tier[] = ['luna', 'sol', 'astra']
 const descriptions: Record<Tier, string> = {
-  luna: 'Bulk mechanical work from an exact spec.',
-  sol: 'Complex multi-file implementation and debugging.',
-  astra: 'The hardest problems and peer-level second opinions.',
+  luna: 'Extraction, classification and summaries from an exact spec; not for writing code.',
+  sol: 'All code writing: implementation, tests, refactors, mechanical edits and debugging.',
+  astra: 'Architectural review and peer-level second opinions; not for writing code.',
 }
 const efforts: Record<Tier, string> = { luna: 'low', sol: 'high', astra: 'xhigh' }
 const missing = new Set<string>()

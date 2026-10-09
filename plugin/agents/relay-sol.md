@@ -1,6 +1,6 @@
 ---
 name: relay-sol
-description: Couriers complex multi-file implementation and debugging to the sol GPT worker. Use only when the claudex policy or the user permits GPT; see the claudex:delegating-to-gpt skill. Pass a complete, self-contained brief. For Workflow scripts and sessions where Claude Mods are off; in the main session use claudex:gpt-sol.
+description: Couriers all code writing (implementation, tests, refactors, mechanical edits and debugging) to the sol GPT worker. Use only when the claudex policy or the user permits GPT; see the claudex:delegating-to-gpt skill. Pass a complete, self-contained brief. For Workflow scripts and sessions where Claude Mods are off; in the main session use claudex:gpt-sol.
 model: sonnet
 effort: low
 tools: Bash

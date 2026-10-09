@@ -1,6 +1,6 @@
 ---
 name: relay-luna
-description: Couriers bulk mechanical work from an exact spec to the luna GPT worker; not for design decisions or ambiguous tasks. Use only when the claudex policy or the user permits GPT; see the claudex:delegating-to-gpt skill. Pass a complete, self-contained brief. For Workflow scripts and sessions where Claude Mods are off; in the main session use claudex:gpt-luna.
+description: Couriers extraction, classification and summaries from an exact spec to the luna GPT worker; not for writing code, design decisions or ambiguous tasks. Use only when the claudex policy or the user permits GPT; see the claudex:delegating-to-gpt skill. Pass a complete, self-contained brief. For Workflow scripts and sessions where Claude Mods are off; in the main session use claudex:gpt-luna.
 model: sonnet
 effort: low
 tools: Bash

@@ -1,6 +1,6 @@
 ---
 name: relay-astra
-description: Couriers the hardest problems and peer-level second opinions to the astra GPT worker. Use only when the claudex policy or the user permits GPT; see the claudex:delegating-to-gpt skill. Pass a complete, self-contained brief. For Workflow scripts and sessions where Claude Mods are off; in the main session use claudex:gpt-astra.
+description: Couriers architectural reviews and peer-level second opinions to the astra GPT worker; not for writing code. For adversarial reviews use claudex:relay-adversary. Use only when the claudex policy or the user permits GPT; see the claudex:delegating-to-gpt skill. Pass a complete, self-contained brief. For Workflow scripts and sessions where Claude Mods are off; in the main session use claudex:gpt-astra.
 model: sonnet
 effort: low
 tools: Bash
