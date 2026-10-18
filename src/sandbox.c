@@ -7,6 +7,7 @@
 #include <seccomp.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
@@ -24,6 +25,31 @@ static int fail(char *err, size_t errlen, const char *fmt, ...) {
     vsnprintf(err, errlen, fmt, ap);
     va_end(ap);
     return -1;
+}
+
+int sandbox_resolver_parent_ok(const char *dir) {
+    static const char *const allowed[] = {
+        "/run/systemd/resolve", "/run/NetworkManager", "/run/resolvconf", "/run/connman", "/run/netconfig",
+        "/var/run/systemd/resolve", "/var/run/NetworkManager", "/var/run/resolvconf", "/var/run/connman", "/var/run/netconfig",
+        NULL,
+    };
+    if (!dir) return 0;
+    for (int i = 0; allowed[i]; i++) if (!strcmp(dir, allowed[i])) return 1;
+    return 0;
+}
+
+void sandbox_default_read_dirs(sandbox_cfg_t *cfg, const char *resolv_path) {
+    memset(cfg->read_dirs, 0, sizeof cfg->read_dirs);
+    cfg->read_dirs[0] = "/etc";
+    cfg->resolver_parent[0] = '\0';
+    struct stat st;
+    if (!resolv_path || lstat(resolv_path, &st) != 0 || !S_ISLNK(st.st_mode) ||
+        !realpath(resolv_path, cfg->resolver_parent)) return;
+    char *slash = strrchr(cfg->resolver_parent, '/');
+    if (!slash) return;
+    if (slash == cfg->resolver_parent) slash[1] = '\0';
+    else *slash = '\0';
+    if (sandbox_resolver_parent_ok(cfg->resolver_parent)) cfg->read_dirs[1] = cfg->resolver_parent;
 }
 
 static int ll_create_ruleset(const struct landlock_ruleset_attr *attr, size_t size, __u32 flags) {
@@ -100,6 +126,8 @@ static int apply_landlock(const sandbox_cfg_t *cfg, char *err, size_t errlen) {
     };
     int rc = allow_read(ruleset, cfg->auth_dir, 1, err, errlen);
     for (int i = 0; rc == 0 && optional[i]; i++) rc = allow_read(ruleset, optional[i], 0, err, errlen);
+    for (int i = 0; rc == 0 && i < SANDBOX_MAX_READ_DIRS && cfg->read_dirs[i]; i++)
+        rc = allow_read(ruleset, cfg->read_dirs[i], 0, err, errlen);
     if (rc == 0) rc = allow_port(ruleset, LANDLOCK_ACCESS_NET_BIND_TCP, cfg->listen_port, err, errlen);
     for (int i = 0; rc == 0 && i < SANDBOX_MAX_PORTS && cfg->connect_ports[i]; i++)
         rc = allow_port(ruleset, LANDLOCK_ACCESS_NET_CONNECT_TCP, cfg->connect_ports[i], err, errlen);

@@ -32,11 +32,15 @@ TEST(minimal_request_gets_fixed_upstream_fields) {
     tr_t t = tr(REQ("\"system\":\"Be brief.\"," USER_HI));
     CHECK_INT(t.rc, 0);
     CHECK_STR(S(&t, "/model"), "gpt-6.1-sol");
-    CHECK_STR(S(&t, "/instructions"), "Be brief.");
+    CHECK(P(&t, "/instructions") == NULL);
     CHECK_STR(S(&t, "/input/0/type"), "message");
-    CHECK_STR(S(&t, "/input/0/role"), "user");
+    CHECK_STR(S(&t, "/input/0/role"), "developer");
     CHECK_STR(S(&t, "/input/0/content/0/type"), "input_text");
-    CHECK_STR(S(&t, "/input/0/content/0/text"), "hi");
+    CHECK_STR(S(&t, "/input/0/content/0/text"), "Be brief.");
+    CHECK_STR(S(&t, "/input/1/type"), "message");
+    CHECK_STR(S(&t, "/input/1/role"), "user");
+    CHECK_STR(S(&t, "/input/1/content/0/type"), "input_text");
+    CHECK_STR(S(&t, "/input/1/content/0/text"), "hi");
     CHECK(yyjson_is_false(P(&t, "/store")));
     CHECK(yyjson_is_true(P(&t, "/stream")));
     CHECK(yyjson_is_true(P(&t, "/parallel_tool_calls")));
@@ -106,13 +110,27 @@ TEST(system_blocks_are_joined_and_billing_header_block_dropped) {
     tr_t t = tr(REQ("\"system\":[{\"type\":\"text\",\"text\":\"x-anthropic-billing-header: cc_version=1\"},"
                     "{\"type\":\"text\",\"text\":\"You are Claude Code.\",\"cache_control\":{\"type\":\"ephemeral\"}},"
                     "{\"type\":\"text\",\"text\":\"Env info.\"}]," USER_HI));
-    CHECK_STR(S(&t, "/instructions"), "You are Claude Code.\n\nEnv info.");
+    CHECK(P(&t, "/instructions") == NULL);
+    CHECK_STR(S(&t, "/input/0/role"), "developer");
+    CHECK_STR(S(&t, "/input/0/content/0/text"), "You are Claude Code.\n\nEnv info.");
     tr_free(&t);
 }
 
-TEST(absent_system_prompt_omits_instructions) {
+TEST(absent_system_prompt_adds_no_developer_message) {
     tr_t t = tr(REQ(USER_HI));
     CHECK(P(&t, "/instructions") == NULL);
+    CHECK_STR(S(&t, "/input/0/role"), "user");
+    tr_free(&t);
+}
+
+TEST(model_and_stream_precede_input) {
+    tr_t t = tr(REQ(USER_HI));
+    CHECK_INT(t.rc, 0);
+    const char *model = strstr(t.x.body, "\"model\"");
+    const char *stream = strstr(t.x.body, "\"stream\"");
+    const char *input = strstr(t.x.body, "\"input\"");
+    CHECK(model && input && model < input);
+    CHECK(stream && input && stream < input);
     tr_free(&t);
 }
 
@@ -346,7 +364,8 @@ int main(void) {
     RUN(unknown_gpt_model_is_404_and_bad_effort_is_400);
     RUN(malformed_requests_are_400);
     RUN(system_blocks_are_joined_and_billing_header_block_dropped);
-    RUN(absent_system_prompt_omits_instructions);
+    RUN(absent_system_prompt_adds_no_developer_message);
+    RUN(model_and_stream_precede_input);
     RUN(user_image_block_becomes_data_url);
     RUN(assistant_text_and_tool_use_keep_their_order);
     RUN(tool_result_variants);

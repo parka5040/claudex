@@ -255,7 +255,7 @@ static mval *pair_calls(mdoc *d, mval *input) {
 
 /* ---- top-level pieces -------------------------------------------------- */
 
-static void add_instructions(mdoc *d, mval *root, yyjson_val *system) {
+static char *add_instructions(yyjson_val *system) {
     buf_t b; buf_init(&b);
     if (yyjson_is_str(system)) {
         buf_append_str(&b, yyjson_get_str(system));
@@ -269,8 +269,9 @@ static void add_instructions(mdoc *d, mval *root, yyjson_val *system) {
             buf_append_str(&b, t);
         }
     }
-    if (b.len) yyjson_mut_obj_add_strcpy(d, root, "instructions", b.data);
+    if (b.len) return b.data;
     buf_free(&b);
+    return NULL;
 }
 
 static int tool_name_ok(const char *n) {
@@ -404,7 +405,7 @@ int translate_request(const char *json, size_t len, xlate_req_t *out, char *err,
     yyjson_mut_doc_set_root(d, up);
 
     yyjson_mut_obj_add_str(d, up, "model", out->sel.slug);
-    add_instructions(d, up, yyjson_obj_get(root, "system"));
+    yyjson_mut_obj_add_bool(d, up, "stream", true);
 
     mval *input = yyjson_mut_arr(d);
     yyjson_val *m;
@@ -415,6 +416,16 @@ int translate_request(const char *json, size_t len, xlate_req_t *out, char *err,
         if (!role || !(yyjson_is_str(content) || yyjson_is_arr(content))) continue;
         if (!strcmp(role, "assistant")) push_assistant_message(d, input, content);
         else push_user_message(d, input, !strcmp(role, "user") ? "user" : "developer", content);
+    }
+    char *instructions = add_instructions(yyjson_obj_get(root, "system"));
+    if (instructions) {
+        mval *msg = yyjson_mut_obj(d), *parts = yyjson_mut_arr(d);
+        yyjson_mut_obj_add_str(d, msg, "type", "message");
+        yyjson_mut_obj_add_str(d, msg, "role", "developer");
+        yyjson_mut_arr_append(parts, text_part(d, "input_text", instructions));
+        yyjson_mut_obj_add_val(d, msg, "content", parts);
+        yyjson_mut_arr_prepend(input, msg);
+        free(instructions);
     }
     yyjson_mut_obj_add_val(d, up, "input", pair_calls(d, input));
 
@@ -428,7 +439,6 @@ int translate_request(const char *json, size_t len, xlate_req_t *out, char *err,
     yyjson_mut_obj_add_val(d, up, "reasoning", reasoning);
 
     yyjson_mut_obj_add_bool(d, up, "store", false);
-    yyjson_mut_obj_add_bool(d, up, "stream", true);
     mval *include = yyjson_mut_arr(d);
     yyjson_mut_arr_add_str(d, include, "reasoning.encrypted_content");
     yyjson_mut_obj_add_val(d, up, "include", include);

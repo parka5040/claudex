@@ -426,12 +426,22 @@ int reducer_on_event(reducer_t *r, const char *json, size_t len) {
     } else if (!strcmp(type, "response.incomplete")) {
         yyjson_val *resp = yyjson_obj_get(ev, "response");
         const char *reason = yyjson_get_str(yyjson_obj_get(yyjson_obj_get(resp, "incomplete_details"), "reason"));
-        const char *stop = "end_turn";
-        if (reason && !strcmp(reason, "max_output_tokens")) stop = "max_tokens";
-        else if (reason && !strcmp(reason, "content_filter")) stop = "refusal";
-        rc = finish_message(r, resp, stop);
+        if (reason && !strcmp(reason, "max_output_tokens")) rc = finish_message(r, resp, "max_tokens");
+        else if (reason && !strcmp(reason, "content_filter")) rc = finish_message(r, resp, "refusal");
+        else {
+            r->done = 1;
+            if (reason && !strcmp(reason, "interrupted")) rc = emit_error(r, 529, "upstream interrupted the response");
+            else {
+                buf_t b; buf_init(&b);
+                rc = buf_appendf(&b, "upstream response incomplete: %s", reason ? reason : "unknown");
+                if (!rc) rc = emit_error(r, 500, b.data);
+                buf_free(&b);
+            }
+        }
     } else if (!strcmp(type, "response.failed")) {
         rc = on_failed(r, yyjson_obj_get(ev, "response"));
+    } else if (!strcmp(type, "error")) {
+        rc = on_failed(r, ev);
     } else if (!strcmp(type, "keepalive") || !strcmp(type, "codex.rate_limits")) {
         rc = emit_ping(r);
     }

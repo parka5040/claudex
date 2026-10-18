@@ -2,6 +2,7 @@
 # Capture only tool definitions via a disposable local Messages API server.
 set -euo pipefail
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/claudex-schemas.XXXXXXXX") || exit 1
+[[ -n $scratch && -d $scratch ]] || exit 1
 trap 'rm -rf -- "$scratch"' EXIT
 python3 - "$scratch" <<'PY'
 import json
@@ -17,7 +18,8 @@ received = []
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        received.extend(tool for tool in body.get('tools', []) if tool.get('name') in wanted)
+        if not received:
+            received.extend(tool for tool in body.get('tools', []) if tool.get('name') in wanted)
         reply = json.dumps({'id': 'msg_capture', 'type': 'message', 'role': 'assistant',
             'content': [{'type': 'text', 'text': 'captured'}], 'model': 'gpt-6-luna',
             'stop_reason': 'end_turn', 'stop_sequence': None,

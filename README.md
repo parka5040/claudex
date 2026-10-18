@@ -42,12 +42,24 @@ for Workflow scripts and sessions where Claude Mods are off.
 ## The proxy
 
 C17, libcurl + yyjson + libseccomp. Loopback only. Before serving it confines itself and
-refuses to run if it cannot: Landlock (read-only on the Codex auth dir, trust store and
-resolver files; no writes anywhere; TCP bind only on its port, connect only to 443/53),
-seccomp (no exec, ptrace, mount, bpf, io_uring, namespaces), non-dumpable, no core files.
+refuses to run if it cannot: Landlock (read-only on the Codex auth dir, trust store,
+resolver files, `/etc`, and the resolver directory `resolv.conf` links into when it is a
+known one: systemd-resolved, NetworkManager, resolvconf, connman, netconfig; no writes
+anywhere; TCP bind only on its port, connect only to 443/53), seccomp (no exec, ptrace,
+mount, bpf, io_uring, namespaces), non-dumpable, no core files. Resolver files rewritten
+inside those directories while the proxy runs stay readable; other external symlink
+targets still need a restart after replacement.
 The upstream URL is compiled in; only `-DCLAUDEX_TEST` builds can point elsewhere. Logs are
 one metadata line per request (model, status, timings, token counts, rate-limit headers),
 never headers or bodies.
+
+Tested with codex-cli 0.163.0. Base instructions travel as a leading developer message
+(Codex ≥ 0.162), not a top-level `instructions` field. The default catalog `client_version`
+is 0.163.0; the installed CLI's version wins when known. Top-level SSE `error` events map
+like `response.failed`. For `response.incomplete`, `max_output_tokens` maps to `max_tokens`,
+`content_filter` to `refusal`, `interrupted` to `overloaded_error` (529), and unknown or
+missing reasons to `api_error` (non-streaming: 502). Headless workers retry overloads;
+native agent steps return the error without a step-level retry.
 
 Model families: `luna`, `sol`, `astra`. Use `gpt-luna`, `gpt-sol`, `gpt-astra` (or a
 versioned slug such as `gpt-6.1-sol`) with optional `@low|medium|high|xhigh|max|ultra`.
@@ -101,16 +113,21 @@ claudex-worker config | set KEY VALUE | status | stop-proxy
 
 ## Claude Mods
 
-Claude Code 2.1.288 or later can load the claudex mod. With `CLAUDEX=on` it registers
+Claude Code 2.1.302 or later can load the claudex mod. With `CLAUDEX=on` it registers
 `claudex:gpt-luna`, `claudex:gpt-sol` and `claudex:gpt-astra` as native Agent types for
 enabled tiers. Dispatch them with the Agent tool, normally in the background: their tool
 rows appear live in the agent panel and the Agent tool notifies the parent when they finish.
 GPT agents finish by calling SubagentHandback like native agents, and each is capped at 200 turns.
-GPT text appears when each step completes, not live as its text is streamed. The Agent row
-shows the agent **type**, not the resolved GPT model. TaskStop cancels the agent's step.
+GPT text appears when each step completes, not live as its text is streamed. Agent rows show
+the type, like native agents; `/tasks` shows the resolved GPT model and effort (e.g.
+`gpt-6.1-sol (high)`) when the proxy is up, else the last status's model or the family alias.
+TaskStop cancels the agent's step. SendMessage resumes a finished GPT agent with its original
+working directory; the resume is refused if claudex no longer has that metadata, and never
+widens read mode to edit.
 Agent admission checks the switch, enabled tiers and parallel limit; a refused spawn does
-not start an agent. The separate `claudex:relay-*` agents remain for Workflow scripts and
-Mods-off sessions; the adversary remains a read-only worker.
+not start an agent. GPT agent types are refused as Workflow agents (use `claudex:relay-*`)
+and as team teammates. The relays also serve Mods-off sessions; the adversary remains a
+read-only worker.
 
 Native GPT agents run **without permission prompts, confined by claudex** ("yolo, but
 sandboxed"). Auto mode cannot judge GPT calls: its classifier verdict comes with the
@@ -132,11 +149,15 @@ read-only toolchain and cache directories (`~/.local/bin`, `~/.local/lib`, `~/.c
 inside the working directory and these read-only toolchain directories. Missing or unusable
 bubblewrap refuses the command, never runs it unsandboxed. Native agents have `read`
 (Read, Grep, Glob; Bash denied) or `edit` (those plus Edit, Write, Bash) tools, not a
-per-agent `yolo` mode.
+per-agent `yolo` mode. Read-mode Write and Edit calls are refused at execution time, not
+only excluded from the advertised tool list.
 
 The mod shows running workers **and agents**, plan use and login life in the status line;
-headless workers and adversary findings in panes; and completion, low-login and
-plan-limit toasts. `/claudex status` (the default), `/claudex config [KEY VALUE]`,
+GPT agents count as soon as they start. Verified on 2.1.302: `/tasks` showed
+`running · gpt-6-luna (low)` beside `running · Opus 5.5 (1M context)`, and the status line
+showed `claudex: 1 running` while the GPT agent ran. Headless workers and adversary findings
+appear in panes; completion, low-login and plan-limit notices in toasts.
+`/claudex status` (the default), `/claudex config [KEY VALUE]`,
 `/claudex workers`, and `/claudex findings [JOB]` run without a model turn. The review
 tools are `mcp__claudex__review` and `mcp__claudex__verdict`; add those names to
 `permissions.allow` for unattended reviews. For Bash relays, add

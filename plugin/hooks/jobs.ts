@@ -1,6 +1,6 @@
 import { atom, read } from 'claude-code'
 import type { EngineInterface, On, Timer, ProcessRunResult, PromptSubmitResult, ToolSpec } from 'claude-code'
-import type { ClaudexJob, ClaudexStatus, ClaudexOwned, ClaudexReview } from '../types/index.d.ts'
+import type { ClaudexJob, ClaudexStatus, ClaudexOwned, ClaudexRetained, ClaudexReview } from '../types/index.d.ts'
 import type { ClaudexAgent } from './agents.ts'
 import { jobsRequest, parseJobs, parseStatus, statusRequest } from './worker.ts'
 
@@ -10,21 +10,23 @@ const statusState = atom({ plugin: 'claudex', key: 'status' } as const, null)
 const jobState = atom({ plugin: 'claudex', key: 'jobs' } as const, [])
 const owned = atom({ plugin: 'claudex', key: 'owned' } as const, {})
 const agents = atom({ plugin: 'claudex', key: 'agents' } as const, {})
+const retained = atom({ plugin: 'claudex', key: 'retained' } as const, {})
 const reviews = atom({ plugin: 'claudex', key: 'reviews' } as const, {})
 const selected = atom({ plugin: 'claudex', key: 'selected' } as const, null)
 const report = atom({ plugin: 'claudex', key: 'report' } as const, null)
 const toasted = atom({ plugin: 'claudex', key: 'toasted' } as const, [])
 const alertedState = atom({ plugin: 'claudex', key: 'alerted' } as const, [])
 
-export const S = { generation, on, status: statusState, jobs: jobState, owned, agents, reviews, selected, report, toasted, alerted: alertedState }
+export const S = { generation, on, status: statusState, jobs: jobState, owned, agents, retained, reviews, selected, report, toasted, alerted: alertedState }
 
 // The host's state.get is a per-dispatch snapshot. All coordination happens here,
 // synchronously, before yielding; state and store are only published projections.
 export const live: {
   token: number; session: string; on: boolean; status: ClaudexStatus | null; jobs: ClaudexJob[]
-  owned: Record<string, ClaudexOwned>; agents: Record<string, ClaudexAgent>; reviews: Record<string, ClaudexReview>
+  owned: Record<string, ClaudexOwned>; agents: Record<string, ClaudexAgent>; retained: Record<string, ClaudexRetained>
+  reviews: Record<string, ClaudexReview>
   selected: string | null; toasted: string[]; alerted: string[]; inflight: Set<string>
-} = { token: 0, session: '', on: false, status: null, jobs: [], owned: {}, agents: {}, reviews: {},
+} = { token: 0, session: '', on: false, status: null, jobs: [], owned: {}, agents: {}, retained: {}, reviews: {},
   selected: null, toasted: [], alerted: [], inflight: new Set() }
 
 const instance = crypto.randomUUID()
@@ -71,6 +73,8 @@ export type CurrentContext = {
   registerAgent: EngineInterface['agent']['register']
   listAgents: EngineInterface['agent']['list']
   publishAgents: (entries: Record<string, ClaudexAgent>) => Promise<void>
+  publishRetained: (entries: Record<string, ClaudexRetained>) => Promise<void>
+  agentsChanged: () => void
   publishOwned: (entries: Record<string, ClaudexOwned>) => Promise<void>
   publishReviews: (entries: Record<string, ClaudexReview>) => Promise<void>
   publishSelected: (id: string | null) => Promise<void>
@@ -79,6 +83,7 @@ export type CurrentContext = {
 }
 let currentContext: CurrentContext | undefined
 let agentWrites: Promise<void> = Promise.resolve()
+let retainedWrites: Promise<void> = Promise.resolve()
 let ownedWrites: Promise<void> = Promise.resolve()
 let reviewWrites: Promise<void> = Promise.resolve()
 let selectedWrites: Promise<void> = Promise.resolve()
@@ -110,12 +115,12 @@ let firstPoll = false
 let activateLater: () => Promise<void> = async () => {}
 let pollLater: () => Promise<void> = async () => {}
 let rearmLater: () => void = () => {}
-let syncLater: () => Promise<void> = async () => {}
+let syncLater: () => Promise<number> = async () => currentToken()
 let sessionBoot: Promise<void> | undefined
 export const rearmCurrent = (): void => rearmLater()
 export const activateCurrent = (): Promise<void> => activateLater()
 export const pollCurrent = (): Promise<void> => pollLater()
-export const syncSessionCurrent = (): Promise<void> => syncLater()
+export const syncSessionCurrent = (): Promise<number> => syncLater()
 
 async function getStatus($: EngineInterface): Promise<ClaudexStatus> {
   const request = statusRequest($.plugin.root)
@@ -152,6 +157,11 @@ export function registerJobs(registrar: On): void {
         agentWrites = agentWrites.then(async () => { await $.state.set({ plugin: 'claudex', key: 'agents' } as const, entries) }).catch(() => {})
         return agentWrites
       },
+      publishRetained: entries => {
+        retainedWrites = retainedWrites.then(async () => { await $.state.set({ plugin: 'claudex', key: 'retained' } as const, entries) }).catch(() => {})
+        return retainedWrites
+      },
+      agentsChanged: () => { if (live.on) $.ui.status(statusLine(live.status, live.jobs)); arm($, live.token) },
       publishOwned: entries => {
         ownedWrites = ownedWrites.then(async () => { await $.state.set({ plugin: 'claudex', key: 'owned' } as const, entries) }).catch(() => {})
         return ownedWrites
@@ -204,17 +214,21 @@ function arm($: EngineInterface, gen: number): void {
   if (interval) timer = $.clock.every(interval, () => { void poll($, gen) })
 }
 
-async function syncSession($: EngineInterface): Promise<void> {
+async function syncSession($: EngineInterface): Promise<number> {
   const session = await $.session.id()
   if (session === live.session) {
+    const token = currentToken()
     if (sessionBoot) await sessionBoot
-    return
+    return token
   }
   const previous = live.session
   live.session = session
   changeOwned(() => ({}))
   live.agents = {}
   void contextCurrent().publishAgents({})
+  live.retained = {}
+  void contextCurrent().publishRetained({})
+  contextCurrent().agentsChanged()
   changeReviews(() => ({}))
   selectReview(null)
   live.alerted = []
@@ -223,9 +237,10 @@ async function syncSession($: EngineInterface): Promise<void> {
   live.jobs = []
   void $.state.set({ plugin: 'claudex', key: 'jobs' } as const, [])
   const boot = activate($)
+  const token = currentToken()
   sessionBoot = boot
   if (previous) $.ui.toast('claudex: earlier jobs belong to the previous conversation')
-  try { await boot } finally { if (sessionBoot === boot) sessionBoot = undefined }
+  try { await boot; return token } finally { if (sessionBoot === boot) sessionBoot = undefined }
 }
 
 export async function activate($: EngineInterface, reload = false): Promise<void> {
@@ -241,13 +256,15 @@ export async function activate($: EngineInterface, reload = false): Promise<void
     const session = await $.session.id()
     if (!isCurrent(gen)) return
     const sameSession = !live.session || live.session === session
-    const [snapshotOwned, snapshotAgents, snapshotReviews, snapshotSelected, snapshotToasted, snapshotAlerted] = await Promise.all([
-      read($, owned), read($, agents), read($, reviews), read($, selected), read($, toasted), read($, alertedState),
+    const [snapshotOwned, snapshotAgents, snapshotRetained, snapshotReviews, snapshotSelected, snapshotToasted, snapshotAlerted] = await Promise.all([
+      read($, owned), read($, agents), read($, retained), read($, reviews), read($, selected), read($, toasted), read($, alertedState),
     ])
     if (!isCurrent(gen)) return
     live.session = session
     live.owned = sameSession ? snapshotOwned : {}
     live.agents = sameSession ? snapshotAgents : {}
+    live.retained = sameSession ? snapshotRetained : {}
+    contextCurrent().agentsChanged()
     live.reviews = sameSession ? snapshotReviews : {}
     live.selected = sameSession ? snapshotSelected : null
     live.toasted = sameSession ? snapshotToasted : []

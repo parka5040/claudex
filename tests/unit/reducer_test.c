@@ -276,6 +276,76 @@ TEST(incomplete_for_token_limit_maps_to_max_tokens) {
     reducer_free(red); rec_free(&r);
 }
 
+TEST(incomplete_content_filter_maps_to_refusal) {
+    rec_t r = {0};
+    reducer_t *red = reducer_new("m", rec_emit, &r);
+    feed(red, CREATED);
+    feed(red, "{\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"content_filter\"}}}");
+    CHECK_STR(names(&r), "message_start message_delta message_stop");
+    CHECK_STR(str_at(&r, 1, "/delta/stop_reason"), "refusal");
+    CHECK_INT(reducer_done(red), 1);
+    reducer_free(red); rec_free(&r);
+}
+
+TEST(incomplete_interrupted_is_a_retryable_overloaded_error) {
+    rec_t r = {0};
+    reducer_t *red = reducer_new("m", rec_emit, &r);
+    feed(red, CREATED);
+    feed(red, "{\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"interrupted\"}}}");
+    CHECK_STR(names(&r), "message_start error");
+    CHECK_STR(str_at(&r, 1, "/error/type"), "overloaded_error");
+    CHECK_STR(str_at(&r, 1, "/error/message"), "upstream interrupted the response");
+    CHECK_INT(find(&r, "message_stop", 0), -1);
+    CHECK_INT(reducer_done(red), 1);
+    int n = r.n;
+    CHECK_INT(reducer_finish(red), 0);
+    CHECK_INT(r.n, n);
+    reducer_free(red); rec_free(&r);
+}
+
+TEST(incomplete_unknown_or_missing_reason_is_an_api_error) {
+    static const struct { const char *event, *message; } cases[] = {
+        { "{\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"mystery\"}}}", "upstream response incomplete: mystery" },
+        { "{\"type\":\"response.incomplete\",\"response\":{}}", "upstream response incomplete: unknown" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        rec_t r = {0};
+        reducer_t *red = reducer_new("m", rec_emit, &r);
+        feed(red, CREATED);
+        feed(red, cases[i].event);
+        CHECK_STR(names(&r), "message_start error");
+        CHECK_STR(str_at(&r, 1, "/error/type"), "api_error");
+        const char *message = str_at(&r, 1, "/error/message");
+        CHECK(message && strstr(message, cases[i].message));
+        CHECK_INT(find(&r, "message_stop", 0), -1);
+        CHECK_INT(reducer_done(red), 1);
+        int n = r.n;
+        CHECK_INT(reducer_finish(red), 0);
+        CHECK_INT(r.n, n);
+        reducer_free(red); rec_free(&r);
+    }
+}
+
+TEST(top_level_error_event_maps_like_response_failed) {
+    static const struct { const char *event, *type, *message; } cases[] = {
+        { "{\"type\":\"error\",\"error\":{\"code\":\"server_is_overloaded\",\"message\":\"busy\"}}", "overloaded_error", "busy" },
+        { "{\"type\":\"error\",\"error\":{\"code\":\"usage_limit_reached\",\"message\":\"limit\"}}", "rate_limit_error", "limit" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        rec_t r = {0};
+        reducer_t *red = reducer_new("m", rec_emit, &r);
+        feed(red, cases[i].event);
+        CHECK_STR(names(&r), "error");
+        CHECK_STR(str_at(&r, 0, "/error/type"), cases[i].type);
+        CHECK_STR(str_at(&r, 0, "/error/message"), cases[i].message);
+        CHECK_INT(reducer_done(red), 1);
+        int n = r.n;
+        CHECK_INT(reducer_finish(red), 0);
+        CHECK_INT(r.n, n);
+        reducer_free(red); rec_free(&r);
+    }
+}
+
 TEST(context_overflow_failure_uses_wording_claude_code_recognises) {
     rec_t r = {0};
     reducer_t *red = reducer_new("m", rec_emit, &r);
@@ -379,6 +449,10 @@ int main(void) {
     RUN(reasoning_with_nothing_to_carry_emits_no_block);
     RUN(cached_tokens_are_split_out_of_input_tokens);
     RUN(incomplete_for_token_limit_maps_to_max_tokens);
+    RUN(incomplete_content_filter_maps_to_refusal);
+    RUN(incomplete_interrupted_is_a_retryable_overloaded_error);
+    RUN(incomplete_unknown_or_missing_reason_is_an_api_error);
+    RUN(top_level_error_event_maps_like_response_failed);
     RUN(context_overflow_failure_uses_wording_claude_code_recognises);
     RUN(failure_codes_map_to_anthropic_error_types);
     RUN(stream_ending_without_terminal_event_is_an_error);

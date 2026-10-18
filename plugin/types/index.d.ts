@@ -5,6 +5,10 @@ export type ClaudexAgent = {
   thinking: Record<string, { type: 'thinking'; thinking: string; signature: string }[]>
 }
 
+export type ClaudexRetained = {
+  tier: 'luna' | 'sol' | 'astra'; cwd: string; mode: 'read' | 'edit'; prompt: string | null
+}
+
 export type ClaudexJobState = 'running' | 'done' | 'failed' | 'cancelled' | 'lost' | 'missing'
 export type ClaudexJob = {
   id: string; tier: string | null; kind: 'worker' | 'adversary' | null; model: string | null; mode: string | null
@@ -45,7 +49,8 @@ declare module 'claude-code' {
   interface PluginState {
     claudex: {
       generation: number; on: boolean; status: ClaudexStatus | null; jobs: ClaudexJob[]
-      owned: Record<string, ClaudexOwned>; agents: Record<string, ClaudexAgent>; reviews: Record<string, ClaudexReview>
+      owned: Record<string, ClaudexOwned>; agents: Record<string, ClaudexAgent>; retained: Record<string, ClaudexRetained>
+      reviews: Record<string, ClaudexReview>
       selected: string | null; report: { job: string; text: string } | null; toasted: string[]; alerted: string[]
     }
   }

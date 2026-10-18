@@ -98,6 +98,7 @@ int main(int argc, char **argv) {
     if (!dir_copy) return 1;
     sb.auth_dir = dirname(dir_copy);
     char err[256];
+    sandbox_default_read_dirs(&sb, "/etc/resolv.conf");
     if (sandbox_apply(&sb, err, sizeof err) != 0) {
         fprintf(stderr, "claudex-proxy: refusing to run unsandboxed: %s\n", err);
         return 1;

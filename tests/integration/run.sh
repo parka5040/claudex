@@ -81,7 +81,9 @@ absent "no internal headers" "$(jq -r '.headers | keys | join(" ")' <<<"$req")" 
 absent "no codex_cli_rs" "$req" "codex_cli_rs"
 absent "client api key not forwarded" "$req" "claudex-local"
 check "upstream model" "$(jq -r '.body | fromjson | .model' <<<"$req")" "gpt-6.1-sol"
-check "upstream instructions" "$(jq -r '.body | fromjson | .instructions' <<<"$req")" "Be brief."
+check "no upstream instructions key" "$(jq -r '.body | fromjson | has("instructions")' <<<"$req")" "false"
+check "upstream developer message" "$(jq -c '.body | fromjson | .input[0]' <<<"$req")" \
+    '{"type":"message","role":"developer","content":[{"type":"input_text","text":"Be brief."}]}'
 check "store false" "$(jq -r '.body | fromjson | .store' <<<"$req")" "false"
 
 echo "  non-streaming turn"

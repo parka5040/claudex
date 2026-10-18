@@ -12,6 +12,7 @@
 #include <time.h>
 
 #define ERR_BODY_MAX (64u * 1024u)
+#define DEFAULT_CODEX_VERSION "0.163.0"
 
 typedef struct {
     CURL            *curl;
@@ -163,11 +164,11 @@ int upstream_fetch_models(char **json, size_t *len) {
     auth_t auth = {0};
     if (auth_load(models_auth_file, &auth) != AUTH_OK) return -1;
     const char *v = getenv("CLAUDEX_CODEX_VERSION");
-    if (!v || !*v) v = "0.160.0";
+    if (!v || !*v) v = DEFAULT_CODEX_VERSION;
     size_t vn = strlen(v);
-    if (vn > 32) v = "0.160.0";
+    if (vn > 32) v = DEFAULT_CODEX_VERSION;
     else for (size_t i = 0; i < vn; i++)
-        if (!((v[i] >= '0' && v[i] <= '9') || v[i] == '.')) { v = "0.160.0"; break; }
+        if (!((v[i] >= '0' && v[i] <= '9') || v[i] == '.')) { v = DEFAULT_CODEX_VERSION; break; }
     char url[1024];
 #ifdef CLAUDEX_TEST
     const char *override = getenv("CLAUDEX_TEST_UPSTREAM");

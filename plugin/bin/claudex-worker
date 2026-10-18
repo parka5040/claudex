@@ -1077,6 +1077,20 @@ cmd_sandbox() {
     return "$rc"
 }
 
+# Best effort: the resolved model for an agent row's label. Never fails admission.
+cmd_model() {
+    [[ $# -eq 1 ]] || die 2 "usage: claudex-worker model TIER"
+    WORK_EFFORT='' WORK_MODE=''
+    check_worker_tier "$1"
+    [[ "$WORK_TIER" != adversary ]] || die 2 "model requires luna, terra, sol or astra"
+    local family=$WORK_GATE model=''
+    if ( ensure_proxy ) >/dev/null 2>&1 && proxy_is_ours; then
+        model=$(proxy_health | jq -r --arg f "$family" '.models[$f] // empty' 2>/dev/null) || model=''
+    fi
+    [[ "$model" =~ ^gpt-[a-z0-9][a-z0-9.-]{0,63}$ ]] && jq -cn --arg m "$model" '{model:$m}'
+    return 0
+}
+
 cmd_step() {
     [[ $# -ge 1 ]] || die 2 "usage: claudex-worker step TIER [--effort E] < request.json"
     WORK_EFFORT='' WORK_MODE=''
@@ -1281,6 +1295,7 @@ claudex-worker $VERSION
   start TIER [same options] < brief               supervised background job
   step TIER [--effort E] < request.json           stream proxy SSE as NDJSON
   admit TIER --running N                          check agent/worker capacity
+  model TIER                                     best-effort resolved model label
   sandbox --cwd DIR [--path PATHVALUE] -c COMMAND  confined Bash, no network
   resolve --cwd DIR PATH                          check resolved path stays inside DIR
   jobs [--json] [--limit N] [--id JOB]... [--owner OWNER] | cancel JOB | findings JOB
@@ -1313,6 +1328,7 @@ main() {
         start)       cmd_start "$@" ;;
         step)        cmd_step "$@" ;;
         admit)       cmd_admit "$@" ;;
+        model)       cmd_model "$@" ;;
         sandbox)     cmd_sandbox "$@" ;;
         resolve)     cmd_resolve "$@" ;;
         jobs)        cmd_jobs "$@" ;;

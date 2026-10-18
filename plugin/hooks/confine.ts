@@ -27,6 +27,7 @@ async function refusal($: EngineInterface, agentId: string | undefined, tool: st
     agent = lookup.agent
   }
   if (agent.cwd === null) return { deny: `claudex: confinement metadata unavailable for ${agentId}` }
+  if (agent.mode === 'read' && (tool === 'Write' || tool === 'Edit')) return { deny: `claudex: ${tool} is not available to read-only GPT agents` }
   if (!insideCwd(agent.cwd, path ?? agent.cwd)) return { deny: `claudex: ${tool} outside ${agent.cwd} refused` }
   if (tool === 'Glob' && pattern && (pattern.startsWith('/') || pattern.split('/').includes('..'))) {
     return { deny: 'claudex: Glob pattern must stay inside the agent cwd' }
@@ -55,7 +56,7 @@ export function registerConfinement(on: On): void {
     .catch(($, e, next) => e.agentId ? { deny: 'claudex: confinement check failed' } : next(e))
   on('tool.call', { tool: 'Edit' }, ($, e, next) => guard($, e, next, 'Edit', e.file_path))
     .catch(($, e, next) => e.agentId ? { deny: 'claudex: confinement check failed' } : next(e))
-  // Grep and Glob exist at runtime but are absent from the 2.1.288 tool type union.
+  // Grep and Glob exist at runtime but are absent from the 2.1.302 tool type union.
   on('tool.call', { tool: /^Grep$/ }, ($, e, next) => guard($, e, next, 'Grep', (e as { path?: string }).path))
     .catch(($, e, next) => e.agentId ? { deny: 'claudex: confinement check failed' } : next(e))
   on('tool.call', { tool: /^Glob$/ }, ($, e, next) => guard($, e, next, 'Glob',

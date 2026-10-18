@@ -61,12 +61,19 @@ plugin-check:
 	@if command -v bash >/dev/null 2>&1; then bash tests/worker/mod_footprint_test.sh; else echo "UNVERIFIED: plugin checks skipped (bash not found)"; fi
 	@if command -v deno >/dev/null 2>&1; then \
 		types="$(MOD_TYPES)"; \
-		if [ -z "$$types" ] && [ -f plugin/.claude-plugin/types/claude-code/index.d.ts ]; then types=plugin/.claude-plugin/types/claude-code/index.d.ts; fi; \
+		types_tmp=''; map=''; \
+		trap '[ -z "$$map" ] || rm -f -- "$$map"; [ -z "$$types_tmp" ] || rm -f -- "$$types_tmp"' 0; \
 		if [ -z "$$types" ] && [ -f .cache/mods-api/claude-code.d.ts ]; then types=.cache/mods-api/claude-code.d.ts; fi; \
+		if [ -z "$$types" ] && [ -f plugin/.claude-plugin/types/claude-code/index.d.ts ] && [ -f plugin/.claude-plugin/types/claude-code-tools/index.d.ts ]; then \
+			types_tmp=$$(mktemp "$${TMPDIR:-/tmp}/claudex-mod-types.XXXXXX.d.ts") || exit 1; \
+			[ -n "$$types_tmp" ] && [ -f "$$types_tmp" ] || exit 1; \
+			cat plugin/.claude-plugin/types/claude-code/index.d.ts plugin/.claude-plugin/types/claude-code-tools/index.d.ts > "$$types_tmp" || exit 1; \
+			types="$$types_tmp"; fi; \
 		if [ ! -f "$$types" ]; then printf 'UNVERIFIED: plugin type check skipped (no API declarations; set MOD_TYPES)\n'; \
 		else map=$$(mktemp "$${TMPDIR:-/tmp}/claudex-mod-imports.XXXXXX.json") || exit 1; \
-			printf '{"imports":{"claude-code":"file://%s"}}\n' "$$(realpath "$$types")" > "$$map"; \
-			deno check --config tests/mod/deno.json --import-map "$$map" plugin/hooks/*.ts plugin/hooks/*.tsx plugin/tests/*; rc=$$?; rm -f "$$map"; exit $$rc; fi; \
+			[ -n "$$map" ] && [ -f "$$map" ] || exit 1; \
+			printf '{"imports":{"claude-code":"file://%s"}}\n' "$$(realpath "$$types")" > "$$map" || exit 1; \
+			deno check --config tests/mod/deno.json --import-map "$$map" plugin/hooks/*.ts plugin/hooks/*.tsx plugin/tests/*; exit $$?; fi; \
 	else echo "UNVERIFIED: plugin checks skipped (deno not found)"; fi
 
 check: test integration worker-test service-test install-test plugin-check

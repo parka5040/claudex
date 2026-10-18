@@ -1,8 +1,8 @@
-// Generated from spikes/native-agents/tool-schemas-2.1.288.json (Claude Code 2.1.288).
+// Generated from spikes/native-agents/tool-schemas-2.1.302.json (Claude Code 2.1.302).
 export const TOOL_SCHEMAS: Record<string, { name: string; description: string; input_schema: unknown }> = {
   "Bash": {
     "name": "Bash",
-    "description": "Executes a bash command and returns its output.\n\n- Working directory persists between calls, but prefer absolute paths \u2014 `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.\n- IMPORTANT: Avoid using this tool to run `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command.\n- `run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. With it, `timeout` is how long the command may run in the background (default 1800000, max 7200000); at that limit it is stopped and you are re-invoked. No `&` needed.\n\n# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first.\n- End git commit messages and PR bodies with the attribution lines given in the conversation's system-reminder, when one is present.",
+    "description": "Executes a bash command and returns its output.\n\n- Working directory persists between calls, but prefer absolute paths \u2014 `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.\n- IMPORTANT: Avoid using this tool to run `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command.\n- `run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. With it, `timeout` is how long the command may run in the background (default 600000, max 7200000); at that limit it is stopped and you are re-invoked. No `&` needed. Foreground `sleep` is blocked; use Monitor with an until-loop to wait on a condition.\n\n# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first.\n- End git commit messages and PR bodies with the attribution lines given in the conversation's system-reminder, when one is present.",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -20,7 +20,7 @@ export const TOOL_SCHEMAS: Record<string, { name: string; description: string; i
           "type": "string"
         },
         "run_in_background": {
-          "description": "Set to true to run this command in the background. With it, `timeout` limits how long the command may run in the background before it is stopped (default 1800000 ms, max 7200000 ms).",
+          "description": "Set to true to run this command in the background. With it, `timeout` limits how long the command may run in the background before it is stopped (default 600000 ms, max 7200000 ms).",
           "type": "boolean"
         },
         "dangerouslyDisableSandbox": {
@@ -194,6 +194,10 @@ export const TOOL_SCHEMAS: Record<string, { name: string; description: string; i
         "pages": {
           "description": "Page range for PDF files (e.g., \"1-5\", \"3\", \"10-20\"). Only applicable to PDF files. Maximum 20 pages per request.",
           "type": "string"
+        },
+        "allow_large": {
+          "description": "Set to true to read a text file, or a line range of one, that is over the usual size limits, up to what still fits in your context. Only use this when you genuinely need all of it or the user asked for the whole file; otherwise read it in parts with offset and limit, or search it.",
+          "type": "boolean"
         }
       },
       "required": [

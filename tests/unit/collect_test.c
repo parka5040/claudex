@@ -116,6 +116,25 @@ TEST(stream_error_becomes_the_response_with_matching_status) {
     yyjson_doc_free(d); collector_free(c);
 }
 
+TEST(incomplete_stream_errors_map_to_502_and_529) {
+    static const struct { const char *type; int status; } cases[] = {
+        { "api_error", 502 }, { "overloaded_error", 529 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        collector_t *c = collector_new();
+        ev(c, "message_start", START);
+        buf_t error; buf_init(&error);
+        buf_appendf(&error, "{\"type\":\"error\",\"error\":{\"type\":\"%s\",\"message\":\"incomplete\"}}", cases[i].type);
+        ev(c, "error", error.data);
+        int st; yyjson_doc *d = result(c, &st);
+        CHECK_INT(st, cases[i].status);
+        CHECK_STR(S(d, "/type"), "error");
+        CHECK_STR(S(d, "/error/type"), cases[i].type);
+        CHECK_STR(S(d, "/error/message"), "incomplete");
+        buf_free(&error); yyjson_doc_free(d); collector_free(c);
+    }
+}
+
 TEST(stream_that_never_completes_is_a_502) {
     collector_t *c = collector_new();
     ev(c, "message_start", START);
@@ -151,6 +170,7 @@ int main(void) {
     RUN(unparseable_tool_arguments_become_empty_input_not_a_crash);
     RUN(thinking_block_keeps_text_and_signature_and_block_order);
     RUN(stream_error_becomes_the_response_with_matching_status);
+    RUN(incomplete_stream_errors_map_to_502_and_529);
     RUN(stream_that_never_completes_is_a_502);
     RUN(works_end_to_end_behind_the_reducer);
     TEST_MAIN_END();
