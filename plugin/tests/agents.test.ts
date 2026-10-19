@@ -3,10 +3,10 @@ import type { AgentInfo, AgentSpawnInput, EngineInterface, On, ToolCallInput, To
 import { registerConfinement } from '../hooks/confine.ts'
 import type { Engine } from 'claude-code/testing'
 import type { ClaudexStatus } from '../types/index.d.ts'
-import { lookupAgent, registerAgents, tierOf, toolsFor } from '../hooks/agents.ts'
+import { isActive, isLive, lookupAgent, modelLabel, registerAgents, tierOf, toolsFor } from '../hooks/agents.ts'
 import type { ClaudexAgent } from '../hooks/agents.ts'
 import { live } from '../hooks/jobs.ts'
-import { admitRequest, sandboxCommand, shellQuote, stepArgv } from '../hooks/worker.ts'
+import { admitRequest, modelRequest, sandboxCommand, shellQuote, stepArgv } from '../hooks/worker.ts'
 import { READ_PROMPT, WRITE_PROMPT } from '../hooks/prompts.ts'
 import { harness, stub } from './harness.ts'
 
@@ -337,6 +337,356 @@ test('queued spawn waits at most five seconds and cannot release the earlier adm
     release?.()
     await first
   }
+})
+
+const registry = (h: ReturnType<typeof harness>): Record<string, ClaudexAgent> =>
+  h.state.get('claudex:agents')?.value as Record<string, ClaudexAgent>
+const resume = ($: Engine, agentId: string, extra: Partial<AgentSpawnInput> = {}) => $.agent.spawn({
+  subagentType: 'claudex:gpt-sol', prompt: 'Continue', description: 'continue', resume: { agentId },
+  tool_use_id: 'toolu_resume', provider: { plugin: 'claudex', tier: 'user' },
+  parentModel: 'claude-sonnet-4', background: false, fork: false, ...extra,
+})
+
+test('admission counts pending and waiting GPT agents but not idle or ended ones', async ($, on) => {
+  const statuses = ['pending', 'running', 'waiting', 'idle', 'completed', 'failed', 'killed'] as const
+  const h = harness(on, { status: status(), jobs: [], listed: [
+    ...statuses.map(s => ({ id: s, type: 'claudex:gpt-sol', status: s, description: s })),
+    { id: 'native', type: 'general-purpose', status: 'running', description: 'native' },
+  ] })
+  on('agent.spawn', ($, e) => ({ model: e.model ?? 'missing', agentId: 'counted' }))
+  await start($)
+  await spawn($, 'claudex:gpt-sol')
+  expect(h.calls.find(c => c.argv[1] === 'admit')?.argv.slice(1)).toEqual(['admit', 'sol', '--running', '3'])
+  for (const s of statuses) {
+    expect(isLive(s)).toBe(['pending', 'running', 'waiting', 'idle'].includes(s))
+    expect(isActive(s)).toBe(['pending', 'running', 'waiting'].includes(s))
+  }
+  expect(isLive('unknown')).toBe(false)
+  expect(isActive('unknown')).toBe(false)
+})
+
+test('live statuses keep the registry entry; ended ones drop it but keep retained metadata', async ($, on) => {
+  const h = harness(on, { status: status(), jobs: [], listed: [] })
+  on('agent.spawn', ($, e) => {
+    h.listed.push({ id: 'keep', type: 'claudex:gpt-sol', status: 'running', description: 'build' })
+    return { model: e.model ?? 'missing', agentId: 'keep' }
+  })
+  await start($)
+  await spawn($, 'claudex:gpt-sol', '/repo/keep')
+  for (const s of ['pending', 'running', 'waiting', 'idle'] as const) {
+    h.listed[0]!.status = s
+    await h.clock.advance(2000)
+    expect(registry(h).keep?.cwd).toBe('/repo/keep')
+  }
+  h.listed[0]!.status = 'completed'
+  await h.clock.advance(2000)
+  expect(registry(h).keep).toBeUndefined()
+  expect((h.state.get('claudex:retained')?.value as Record<string, unknown>).keep)
+    .toEqual({ tier: 'sol', cwd: '/repo/keep', mode: 'edit', prompt: 'Build the module' })
+})
+
+test('workflow and teammate GPT spawns are denied before any worker call', async ($, on) => {
+  const h = harness(on, { status: status(), jobs: [] })
+  let forwards = 0
+  on('agent.spawn', () => { forwards++; return { model: 'unexpected', agentId: 'unexpected' } })
+  await start($)
+  expect(await resume($, 'wf', { workflow: { runId: 'wf_1', agentIndex: 1 } }))
+    .toEqual({ deny: 'claudex: GPT agent types cannot run as Workflow agents; use claudex:relay-sol in Workflow scripts' })
+  expect(await resume($, 'team', { isTeammate: true }))
+    .toEqual({ deny: 'claudex: GPT agent types cannot join a team yet; spawn them as subagents' })
+  expect(h.calls.filter(c => c.argv[1] === 'model' || c.argv[1] === 'admit')).toHaveLength(0)
+  expect(forwards).toBe(0)
+})
+
+test('resume uses retained metadata, never guesses a cwd, and never widens mode', async ($, on) => {
+  const s = status()
+  const h = harness(on, { status: s, jobs: [], listed: [] })
+  const forwarded: AgentSpawnInput[] = []
+  const captured: ClaudexAgent[] = []
+  on('agent.spawn', ($, e) => {
+    forwarded.push(e)
+    if (e.resume) captured.push(registry(h).r1!)
+    else h.listed.push({ id: 'r1', type: 'claudex:gpt-sol', status: 'running', description: 'build' })
+    return { model: e.model ?? 'gpt-sol', agentId: 'r1' }
+  })
+  await start($)
+  await spawn($, 'claudex:gpt-sol', '/repo/sub')
+  h.listed[0]!.status = 'completed'
+  await h.clock.advance(2000)
+  expect(registry(h).r1).toBeUndefined()
+  expect((await resume($, 'r1')).agentId).toBe('r1')
+  expect(captured[0]).toMatchObject({ cwd: '/repo/sub', prompt: 'Build the module', final: null, mode: 'edit' })
+  expect(forwarded.at(-1)?.model).toBeUndefined()
+  const before = forwarded.length
+  expect(await resume($, 'ghost')).toEqual({ deny: 'claudex: cannot resume GPT agent ghost: its confinement metadata is gone; spawn a new agent' })
+  expect(forwarded).toHaveLength(before)
+  s.policy.CLAUDEX_WORKER_MODE = 'read'
+  await command($, 'CLAUDEX_WORKER_MODE', 'read')
+  await resume($, 'r1', { model: 'unchanged', cwd: '/not-the-original' })
+  expect(captured.at(-1)).toMatchObject({ cwd: '/repo/sub', mode: 'read' })
+  expect(forwarded.at(-1)?.model).toBe('unchanged')
+  s.policy.CLAUDEX_WORKER_MODE = 'edit'
+  await command($, 'CLAUDEX_WORKER_MODE', 'edit')
+  await h.clock.advance(2000)
+  await resume($, 'r1')
+  expect(captured.at(-1)?.mode).toBe('read')
+  expect(h.calls.filter(c => c.argv[1] === 'model')).toHaveLength(1)
+})
+
+test('a pending resume is pinned against pruning and rolled back on denial', async ($, on) => {
+  const h = harness(on, { status: status(), jobs: [], listed: [] })
+  let release: (() => void) | undefined
+  let ready: (() => void) | undefined
+  const started = new Promise<void>(resolve => { ready = resolve })
+  let outcome: 'wait' | 'deny' | 'allow' = 'wait'
+  on('agent.spawn', async ($, e) => {
+    if (!e.resume) {
+      h.listed.push({ id: 'r2', type: 'claudex:gpt-sol', status: 'running', description: 'build' })
+      return { model: e.model ?? 'gpt-sol', agentId: 'r2' }
+    }
+    if (outcome === 'deny') return { deny: 'nope' }
+    if (outcome === 'allow') return { model: 'gpt-sol', agentId: 'r2' }
+    ready?.()
+    await new Promise<void>(resolve => { release = resolve })
+    return { model: 'gpt-sol', agentId: 'r2' }
+  })
+  on('session.messages', () => ({ value: [{ role: 'user', content: [{ type: 'text', text: 'Continue' }] }] }))
+  on('tool.list', () => ({ value: [] }))
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout', text: [
+      { type: 'message_start', message: { model: 'gpt-6.1-sol' } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: 'resumed result' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+      { type: 'message_stop' },
+    ].map(item => JSON.stringify(item)).join('\n') + '\n' }
+    return { value: { code: 0, signal: null } }
+  })
+  await start($)
+  await spawn($, 'claudex:gpt-sol', '/repo/sub')
+  h.listed[0]!.status = 'completed'
+  await h.clock.advance(2000)
+  const pending = resume($, 'r2')
+  await started
+  try {
+    await h.clock.advance(2000)
+    expect(registry(h).r2).toMatchObject({ cwd: '/repo/sub', final: null })
+    for await (const _ of $.turn.step({ turnId: 't', index: 0, model: 'gpt-sol', messageCount: 1, agentId: 'r2' })) { /* Consume. */ }
+    expect(registry(h).r2).toMatchObject({ cwd: '/repo/sub', final: 'resumed result' })
+  } finally { release?.(); await pending }
+  await h.clock.advance(2000)
+  expect(registry(h).r2).toBeUndefined()
+  outcome = 'deny'
+  expect(await resume($, 'r2')).toEqual({ deny: 'nope' })
+  expect(registry(h).r2).toBeUndefined()
+  outcome = 'allow'
+  await resume($, 'r2')
+  const prior = registry(h).r2
+  outcome = 'deny'
+  expect(await resume($, 'r2')).toEqual({ deny: 'nope' })
+  expect(registry(h).r2).toEqual(prior)
+})
+
+test('a stale completed poll cannot prune a successfully resumed agent or its step result', async ($, on) => {
+  let releaseList: ((value: AgentInfo[]) => void) | undefined
+  let releaseResume: (() => void) | undefined
+  let entered: (() => void) | undefined
+  const started = new Promise<void>(resolve => { entered = resolve })
+  let holdList = false
+  const h = harness(on, { status: status(), jobs: [], listed: [
+    { id: 'other', type: 'claudex:gpt-sol', status: 'running', description: 'other' },
+    { id: 'resumed', type: 'claudex:gpt-sol', status: 'completed', description: 'finished' },
+  ], listAgents: () => holdList ? new Promise(resolve => { releaseList = resolve }) : Promise.resolve(h.listed) })
+  h.state.set('claudex:agents', { version: 1, value: { other: { tier: 'sol', cwd: '/repo/other', prompt: null,
+    mode: 'edit', model: 'gpt-sol', final: null, thinking: {} } } })
+  h.state.set('claudex:retained', { version: 1, value: {
+    resumed: { tier: 'sol', cwd: '/repo/resumed', mode: 'edit', prompt: 'original' },
+  } })
+  on('agent.spawn', async () => {
+    entered?.()
+    await new Promise<void>(resolve => { releaseResume = resolve })
+    return { model: 'gpt-sol', agentId: 'resumed' }
+  })
+  on('session.messages', () => ({ value: [{ role: 'user', content: [{ type: 'text', text: 'Continue' }] }] }))
+  on('tool.list', () => ({ value: [] }))
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout', text: [
+      { type: 'message_start', message: { model: 'gpt-6.1-sol' } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: 'resumed final' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+      { type: 'message_stop' },
+    ].map(item => JSON.stringify(item)).join('\n') + '\n' }
+    return { value: { code: 0, signal: null } }
+  })
+  await start($)
+  const pending = resume($, 'resumed')
+  await started
+  try {
+    for await (const _ of $.turn.step({ turnId: 't-stale', index: 0, model: 'gpt-sol', messageCount: 1, agentId: 'resumed' })) { /* Consume. */ }
+    expect(registry(h).resumed).toMatchObject({ cwd: '/repo/resumed', final: 'resumed final' })
+    holdList = true
+    await h.clock.advance(2000)
+    expect(releaseList).toBeDefined()
+    releaseResume?.()
+    expect(await pending).toEqual({ model: 'gpt-sol', agentId: 'resumed' })
+    releaseList?.(h.listed)
+    await h.clock.settle()
+    expect(registry(h).resumed).toMatchObject({ cwd: '/repo/resumed', final: 'resumed final' })
+  } finally {
+    releaseResume?.()
+    releaseList?.(h.listed)
+    await pending
+    await h.clock.settle()
+  }
+})
+
+test('retained metadata reloads, evicts oldest entries at 256, and clears on a new session', async ($, on) => {
+  const h = harness(on, { status: status(), jobs: [] })
+  const kept = { tier: 'sol' as const, cwd: '/repo/original', mode: 'read' as const, prompt: 'original' }
+  h.state.set('claudex:retained', { version: 1, value: Object.fromEntries(
+    Array.from({ length: 256 }, (_, i) => [`saved-${i}`, kept])) })
+  on('agent.spawn', ($, e) => ({ model: e.model ?? 'gpt-sol', agentId: e.resume?.agentId ?? 'newest' }))
+  await start($)
+  await resume($, 'saved-255')
+  expect(registry(h)['saved-255']).toMatchObject(kept)
+  await spawn($, 'claudex:gpt-sol', '/repo/new')
+  const retained = h.state.get('claudex:retained')?.value as Record<string, unknown>
+  expect(Object.keys(retained)).toHaveLength(256)
+  expect(retained['saved-0']).toBeUndefined()
+  expect(retained['saved-1']).toEqual(kept)
+  expect(retained.newest).toEqual({ tier: 'sol', cwd: '/repo/new', mode: 'edit', prompt: 'Build the module' })
+  h.opts.sessionId = 'session-b'
+  await h.clock.advance(2000)
+  expect(h.state.get('claudex:retained')?.value).toEqual({})
+  expect(await resume($, 'saved-255')).toEqual({ deny: 'claudex: cannot resume GPT agent saved-255: its confinement metadata is gone; spawn a new agent' })
+})
+
+test('a spawn after a session id change keeps its cwd and retained metadata through the first poll', async ($, on) => {
+  const h = harness(on, { status: status(), jobs: [], sessionId: 'session-a', listed: [] })
+  on('agent.spawn', ($, e) => {
+    h.listed.push({ id: 'after-clear', type: 'claudex:gpt-sol', status: 'running', description: 'build' })
+    return { model: e.model ?? 'missing', agentId: 'after-clear' }
+  })
+  await start($)
+  h.opts.sessionId = 'session-b'
+  expect(await spawn($, 'claudex:gpt-sol', '/repo/after-clear')).toEqual({ model: 'gpt-sol', agentId: 'after-clear' })
+  await h.clock.settle()
+  const kept = { tier: 'sol', cwd: '/repo/after-clear', mode: 'edit', prompt: 'Build the module' }
+  expect(registry(h)['after-clear']).toMatchObject(kept)
+  expect((h.state.get('claudex:retained')?.value as Record<string, unknown>)['after-clear']).toEqual(kept)
+  await h.clock.advance(2000)
+  expect(registry(h)['after-clear']).toMatchObject(kept)
+  expect((h.state.get('claudex:retained')?.value as Record<string, unknown>)['after-clear']).toEqual(kept)
+})
+
+test('rediscovery of pending, waiting and idle GPT agents uses retained metadata before null cwd', async () => {
+  const previousAgents = live.agents, previousRetained = live.retained
+  try {
+    live.agents = {}
+    live.retained = { rediscovered: { tier: 'sol', cwd: '/repo/saved', mode: 'read', prompt: 'saved prompt' } }
+    for (const s of ['pending', 'waiting', 'idle'] as const) {
+      live.agents = {}
+      const engine = { agent: { list: async () => [
+        { id: 'rediscovered', type: 'claudex:gpt-sol', status: s },
+      ] } } as unknown as EngineInterface
+      expect(await lookupAgent(engine, 'rediscovered')).toEqual({ kind: 'claudex', agent: {
+        tier: 'sol', cwd: '/repo/saved', mode: 'read', prompt: 'saved prompt', model: 'gpt-sol', final: null, thinking: {},
+      } })
+    }
+  } finally { live.agents = previousAgents; live.retained = previousRetained }
+})
+
+test('a thrown resume restores its previous live entry or removes its provisional one', async () => {
+  type Handler = ($: EngineInterface, e: AgentSpawnInput,
+    next: ((e: AgentSpawnInput) => Promise<never>) & { signal: AbortSignal }) => Promise<{ deny?: string }>
+  let handler: Handler | undefined
+  registerAgents(((event: string, matcher: unknown, fn: Handler) => {
+    if (event === 'agent.spawn') handler = fn
+    return { catch: () => {} }
+  }) as unknown as On)
+  const engine = { plugin: { root: '/plugin' }, clock: { after: () => ({ cancel: () => {} }) },
+    agent: { list: async () => [] }, process: { run: async () => stub('') } } as unknown as EngineInterface
+  const input: AgentSpawnInput = { subagentType: 'claudex:gpt-sol', resume: { agentId: 'throwing' },
+    prompt: 'Continue', description: 'continue', tool_use_id: 'toolu_throw', provider: { plugin: 'claudex', tier: 'user' },
+    parentModel: 'claude-sonnet-4', background: false, fork: false }
+  const saved: ClaudexAgent = { tier: 'sol', cwd: '/repo/saved', mode: 'read', prompt: 'original',
+    model: 'gpt-6.1-sol', final: 'old final', thinking: { tool: [{ type: 'thinking', thinking: 'signed', signature: 'sig' }] } }
+  const previousAgents = live.agents, previousRetained = live.retained
+  try {
+    live.retained = { throwing: { tier: 'sol', cwd: '/repo/saved', mode: 'read', prompt: 'original' } }
+    for (const prior of [undefined, saved]) {
+      live.agents = prior ? { throwing: prior } : {}
+      let provisional: ClaudexAgent | undefined
+      const next = Object.assign(async () => {
+        provisional = live.agents.throwing
+        throw new Error('next failed')
+      }, { signal: new AbortController().signal })
+      expect((await handler!(engine, input, next)).deny).toContain('claudex: admission failed:')
+      expect(provisional).toMatchObject({ cwd: '/repo/saved', mode: 'read', prompt: 'original', final: null })
+      expect(provisional?.thinking).toEqual(prior?.thinking ?? {})
+      expect(live.agents.throwing).toEqual(prior)
+    }
+  } finally { live.agents = previousAgents; live.retained = previousRetained }
+})
+
+test('spawn label comes from the model probe, then status models, then the alias', async ($, on) => {
+  const s = status()
+  const h = harness(on, { status: s, jobs: [] })
+  const forwarded: AgentSpawnInput[] = []
+  let probe = '{"model":"gpt-6.1-sol"}\n'
+  let reject = false
+  h.opts.route = c => c.argv[1] === 'model' ? reject ? Promise.reject(new Error('timed out')) : stub(probe) :
+    c.argv[1] === 'status' ? stub(JSON.stringify(s)) : c.argv[1] === 'jobs' ? stub('[]') : stub('')
+  on('agent.spawn', ($, e) => { forwarded.push(e); return { model: e.model ?? 'missing', agentId: `label-${forwarded.length}` } })
+  await start($)
+  await spawn($, 'claudex:gpt-sol')
+  expect(forwarded.at(-1)?.model).toBe('gpt-6.1-sol')
+  expect(registry(h)['label-1']?.model).toBe('gpt-6.1-sol')
+  const calls = h.calls.filter(c => ['model', 'admit'].includes(c.argv[1]!))
+  expect(calls.map(c => c.argv[1])).toEqual(['model', 'admit'])
+  expect(calls[0]?.init?.timeoutMs).toBe(5000)
+  expect(modelRequest('/plugin', 'sol')).toEqual({ argv: ['/plugin/bin/claudex-worker', 'model', 'sol'], init: { timeoutMs: 5000 } })
+  probe = ''
+  s.models = { luna: 'gpt-6-luna', sol: 'gpt-6.1-sol', astra: 'gpt-6-astra', terra: 'gpt-6.1-sol', source: 'backend', fetched_age_s: 1 }
+  await command($, 'CLAUDEX_WORKER_MODE', 'edit')
+  await spawn($, 'claudex:gpt-sol')
+  expect(forwarded.at(-1)?.model).toBe('gpt-6.1-sol')
+  s.models = null
+  await command($, 'CLAUDEX_WORKER_MODE', 'edit')
+  for (const invalid of ['timeout', '{"model":"sonnet; rm"}', '{bad', '{"model":42}']) {
+    reject = invalid === 'timeout'
+    probe = invalid
+    await spawn($, 'claudex:gpt-sol')
+    expect(forwarded.at(-1)?.model).toBe('gpt-sol')
+  }
+  const previous = live.status
+  try {
+    live.status = s
+    expect(modelLabel('sol', '{"model":"gpt-6.1-sol"}\n')).toBe('gpt-6.1-sol')
+    for (const bad of ['', '{bad', '{"model":"sonnet; rm"}', '{"model":42}', '{"model":"gpt-"}']) expect(modelLabel('sol', bad)).toBe('gpt-sol')
+    s.models = { luna: 'gpt-6-luna', sol: 'gpt-6.1-sol', astra: 'gpt-6-astra', terra: 'gpt-6.1-sol', source: 'backend', fetched_age_s: 1 }
+    expect(modelLabel('sol', '')).toBe('gpt-6.1-sol')
+    s.models.sol = 'invalid'
+    expect(modelLabel('sol', '')).toBe('gpt-sol')
+  } finally { live.status = previous }
+})
+
+test('recording or pruning an agent redraws the status line without waiting for a poll', async ($, on) => {
+  const h = harness(on, { status: status(), jobs: [], listed: [] })
+  on('agent.spawn', ($, e) => {
+    h.listed.push({ id: 's1', type: 'claudex:gpt-sol', status: 'running', description: 'build' })
+    return { model: e.model ?? 'missing', agentId: 's1' }
+  })
+  await start($)
+  expect(h.statuses.at(-1)).toContain('idle')
+  // Pass the cold-start poll so the idle timer is on its 60-second cadence.
+  await h.clock.advance(2000)
+  await spawn($, 'claudex:gpt-sol')
+  expect(h.statuses.at(-1)).toContain('1 running')
+  h.listed[0]!.status = 'completed'
+  await h.clock.advance(2000)
+  expect(h.statuses.at(-1)).toContain('idle')
 })
 
 test('spawn catch fails closed on hook failure', () => {

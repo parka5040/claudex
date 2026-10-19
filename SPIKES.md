@@ -126,3 +126,23 @@ claudex config dir. Throwaway mods, drivers and captures: `spikes/native-agents/
 | C1 lineup | `GET /backend-api/codex/models?client_version=…` → `{models:[…]}` with `slug`, `priority`, `visibility`, `supported_in_api`; no release date. |
 | C2 probes | `gpt-6.1-sol` 200 "hello"; `gpt-6.1-luna` and `gpt-6.1-astra` 400 "not supported". |
 | Gate (plan task 0) | `FINDINGS-GATE.md`: with the agent panel open, a GPT agent's view shows the same tool rows as a native `general-purpose` control; a skipped hook fails the step with HTTP 404 `model_not_found` (no Claude reply); rows show the agent type, not a model; GPT text appears when its step completes; a 107 s sol@high step completed through `$.process.spawn`. User decided GO. |
+
+## Claude Code 2.1.302 / codex-cli 0.163.0 (2026-10-18)
+
+Director observations before the 0.4.0 changes:
+- PTY probes A–C: 200×50, pyte, one `claudex:gpt-luna` beside one native `general-purpose` agent, repo plugin loaded through `--plugin-dir`.
+- ListAgents: checked running and completed rows in an interactive session.
+- SendMessage: resumed a completed agent in an interactive session and checked Read inside its cwd.
+
+| Surface | GPT agent | Native agent |
+|---|---|---|
+| Footer agent list while running (type, description, time, ↓ tokens) | listed, same | listed |
+| Footer list after completion, not viewed | dropped, same | dropped |
+| Footer list after completion, while its view is open | kept, same | kept |
+| Transcript view (Enter): prompt, Trail, Edit diff, live activity | same | same |
+| `/tasks` model column | **`gpt-luna (low)`**, the bare alias | `Haiku 5.5` |
+| ListAgents rows, running then completed | same | same |
+| SendMessage resume of a completed agent; Read inside its cwd | works | works |
+| claudex status line while a GPT agent runs | **`claudex: idle`** | n/a |
+
+After Tasks 1–3, the director verified on 2.1.302: `/tasks` showed `running · gpt-6-luna (low)` beside `running · Opus 5.5 (1M context)`, and the status line showed `claudex: 1 running` while the GPT agent ran.

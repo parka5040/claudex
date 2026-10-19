@@ -23,6 +23,8 @@ export function parseFindings(result: ProcessRunResult): ClaudexFinding[] | null
   if (result.exitCode === 1) return null
   return json(result, 'findings')
 }
+export const modelRequest = (root: string, tier: Tier): Request =>
+  request(root, ['model', tier], { timeoutMs: 5000 })
 export const admitRequest = (root: string, tier: Tier, running: number): Request =>
   request(root, ['admit', tier, '--running', String(running)], { timeoutMs: 15_000 })
 export const resolveRequest = (root: string, cwd: string, path: string): Request =>

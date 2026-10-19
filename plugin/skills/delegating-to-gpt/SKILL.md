@@ -71,6 +71,8 @@ separate read-only review using `CLAUDEX_ADVERSARY_MODEL` (default `gpt-astra@xh
 
 ## Workflow scripts and sessions with Claude Mods off
 
+The mod refuses `claudex:gpt-*` as Workflow agents, so Workflow scripts use the `claudex:relay-*` couriers.
+
 Workflows use courier agents `claudex:relay-luna`, `claudex:relay-sol`,
 `claudex:relay-astra`, or `claudex:relay-adversary` (Workflow agent ids are not names the mod
 registers). In a Mods-off session, those relays or Bash can dispatch a headless worker:

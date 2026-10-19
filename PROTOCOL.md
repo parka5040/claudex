@@ -1,9 +1,11 @@
 # PROTOCOL.md — ChatGPT-auth Codex Responses backend, as spoken by openai/codex
 
 Reference for the claudex proxy (Anthropic Messages -> OpenAI Responses on the ChatGPT Codex backend).
-Everything here was read from source; nothing was sent to the network.
+Original observations were read from source; no model requests were sent. The 0.163.0 delta
+below uses the approved design's source citations and is marked `INFERRED` where not independently
+re-read here.
 
-- Primary source: `openai/codex` @ `595cc91e8cbb1c2ca822d0311dcf12709410c582` (main, 2026-09-19, "Avoid fork when spawning macOS filesystem helpers (#46661)"). Paths below are relative to `codex-rs/`.
+- Primary sources: `openai/codex` @ `595cc91e8cbb1c2ca822d0311dcf12709410c582` (main, 2026-09-19, "Avoid fork when spawning macOS filesystem helpers (#46661)") and `rust-v0.163.0` @ `83086188a`. Paths below are relative to `codex-rs/`; observations without a version remain from the older revision.
 - Secondary (cross-check only, no code copied): `raine/claude-code-proxy` @ `84434db444e5bb6b9a7ec577dd74a7e735f9b27d`, paths prefixed `ccp:`.
 - `INFERRED` = not stated by source, deduced. `CCP-OBSERVED` = a claim made in claude-code-proxy comments/tests about live backend behaviour (not verifiable from openai/codex source).
 
@@ -18,7 +20,7 @@ Everything here was read from source; nothing was sent to the network.
 
 - Path is always `"/responses"`, method `POST`: `codex-api/src/endpoint/responses.rs` `ResponsesClient::stream_encoded` (`Method::POST, "/responses"`).
 - Only wire API left is Responses: `model-provider-info/src/lib.rs` `enum WireApi { Responses }` (`wire_api = "chat"` is a hard error).
-- Other backend routes on the same base (not needed by us): `/models?client_version=…` (`model-provider/src/models_endpoint.rs`), `/memories/trace_summarize`, `/realtime/calls` (`core/src/client.rs` consts).
+- Other backend routes on the same base: `/models?client_version=…` (`model-provider/src/models_endpoint.rs`), `/memories/trace_summarize`, `/realtime/calls` (`core/src/client.rs` consts). claudex fetches `/models` with the installed CLI's version when known, otherwise `0.163.0` (also the fallback for an invalid version).
 
 ### SSE vs WebSocket
 - Transport selection: `core/src/client.rs` `ModelClientSession::stream`. If `responses_websocket_enabled()` (provider `supports_websockets` = true for the built-in OpenAI provider, and session flag `disable_websockets` not set) it tries WebSocket first; otherwise, or on `WebsocketStreamOutcome::FallbackToHttp`, it calls `stream_responses_api` (HTTPS + SSE).
@@ -80,19 +82,21 @@ Response headers the client reads (`codex-api/src/sse/responses.rs` `spawn_respo
 
 ## 3. Request body schema
 
-`codex-api/src/common.rs` `struct ResponsesApiRequest` (exact serialization order):
+`codex-api/src/common.rs` `struct ResponsesApiRequest`. INFERRED 0.163.0 update (approved
+design citation: `rust-v0.163.0`, `codex-api/src/common.rs:279`): `instructions` is no longer a
+field; `model` and `stream` serialize before `input` so incremental gateways see them first.
+The remaining fields below retain the older source observations.
 
 | Field | Type | Sent | Value the official client uses | Source |
 |---|---|---|---|---|
 | `model` | string | always | `model_info.slug` | `build_responses_request` |
-| `instructions` | string | skipped if empty | base instructions (non-lite); empty => omitted (lite) | `#[serde(skip_serializing_if = "String::is_empty")]` |
+| `stream` | bool | always, before `input` | `true` | 0.163.0, INFERRED as above |
 | `input` | array of items | always | section 5 | |
 | `tools` | array (raw JSON) | skipped if `None` | always `Some([...])` on normal lane (may be `[]`); `None` on lite | |
 | `tool_choice` | string | always | always `"auto"` (client never sends object form) | |
 | `parallel_tool_calls` | bool | always | `prompt.parallel_tool_calls && !use_responses_lite`; regular turns set `true` (`core/src/session/turn.rs:1567`) | |
 | `reasoning` | object or `null` | always (no skip attr; client always passes `Some`) | `{effort?, summary?, context?}` | `build_reasoning` |
 | `store` | bool | always | `false` | |
-| `stream` | bool | always | `true` | |
 | `stream_options` | object | optional | `{"reasoning_summary_delivery":"sequential_cutoff"}` only with feature `concurrent_reasoning_summaries` + summary on | |
 | `include` | string[] | always | `["reasoning.encrypted_content"]` | |
 | `service_tier` | string | optional | only if model lists the tier (`ModelInfo::service_tier_for_request`); catalog tiers: `priority` (all), `ultrafast` (sol). Value `default` is never sent. | |
@@ -111,12 +115,13 @@ Context: `context_window` 272000 (astra, 5.6-*, 5.5, 5.4), `max_context_window` 
 
 ---
 
-## 4. `instructions` handling
+## 4. Base instructions as a leading developer message
 
-- Normal lane: `instructions` = `prompt.base_instructions.text` verbatim (`build_responses_request`). Default text = `BASE_INSTRUCTIONS_DEFAULT` or the per-model template from `models.json` `model_messages.instructions_template` (`protocol/src/models.rs` `struct BaseInstructions`, `BaseInstructionsProvenance::{Custom, Model}`).
+- INFERRED 0.163.0 update (approved design citation: `rust-v0.163.0`, `core/src/client.rs:996-1006`): since 0.162.0, base instructions travel as the leading `input` item, `{"type":"message","role":"developer","content":[{"type":"input_text","text":"…"}]}`. No top-level `instructions` key is sent. Default text comes from `BASE_INSTRUCTIONS_DEFAULT` or the per-model template in `models.json` `model_messages.instructions_template` (`protocol/src/models.rs` `struct BaseInstructions`, `BaseInstructionsProvenance::{Custom, Model}`).
+- claudex joins system blocks with `\n\n`, drops billing-header blocks starting with `x-anthropic-billing-header:`, and emits this developer message only when the joined text is non-empty. A string `system` is taken whole.
 - The official client supports fully custom instructions: `config.toml` `model_instructions_file` ("override the built-in instructions… STRONGLY DISCOURAGED… will likely degrade model performance" — a quality warning, not a validity one; `config/src/config_toml.rs`), and `Config.base_instructions` override (`core/src/config/mod.rs`). `BaseInstructionsProvenance::Custom`: "explicitly configured and must survive model changes unchanged".
 - No code path handles an "instructions are not valid"-style rejection: repo-wide grep for such strings returns nothing; `codex-api/src/api_bridge.rs` `map_api_error` has no instruction-specific branch (400 => generic `InvalidRequest(body)`). INFERRED: at this commit the backend does not validate instructions against a Codex allowlist (historically it did for older models; the client has no remnant of that). ccp sends the Claude Code system prompt as `instructions` on the normal lane (`ccp:…/request.rs` `translate_request_inner`, `flatten_system_text`).
-- `instructions` may be omitted entirely (skip-if-empty), as the lite lane does.
+- Empty base instructions add no developer message. The older normal-lane `instructions` field and lite-only relocation described in section 1 are historical, not the 0.163.0 request shape.
 - Where other prompt text goes (all are `input` items, `type:"message"`, `content:[{"type":"input_text",…}]`):
   - role `developer`: permissions/sandbox text, developer_instructions override, apps/plugins/skills guidance, current-time reminders (`core/src/context/*.rs`, each `fn role() -> "developer"`).
   - role `user`: AGENTS.md user instructions and `<environment_context>` blocks, plus the real user turn.
@@ -227,8 +232,29 @@ Parser: `codex-api/src/sse/responses.rs` `process_sse_with_treatment` + `process
 | `response.custom_tool_call_input.delta` | `delta`, `item_id`\|`call_id` | freeform tool input streaming |
 | `response.completed` | `response.id`, `response.usage`, `response.end_turn?` | terminal success; parser returns right after |
 | `response.failed` | `response.error {type?, code?, message?, plan_type?, resets_at?}` | error stored, surfaced when stream closes |
-| `response.incomplete` | `response.incomplete_details.reason` | error `"Incomplete response returned, reason: {reason}"` |
+| `error` | top-level `error {code?, message?}` | INFERRED 0.163.0: same code mapping as `response.failed` (see below) |
+| `response.incomplete` | `response.incomplete_details.reason` | INFERRED 0.163.0: reason-specific terminal handling (see below) |
 | explicitly ignored | `response.function_call_arguments.delta`, `response.function_call_arguments.done`, `response.content_part.added/done`, `response.output_text.done`, `response.in_progress`, `response.reasoning_summary_part.done`, `response.custom_tool_call_input.done`, `response.metadata`, `codex.response.metadata`, `responsesapi.websocket_timing`, any other `*.delta` | trace log only |
+
+INFERRED 0.163.0 delta (approved design citations: `rust-v0.163.0`,
+`codex-api/src/sse/responses.rs:349,419-440`): the top-level `error` event is terminal,
+not an unknown event. claudex maps it through the same code table as `response.failed`:
+`server_is_overloaded` -> `overloaded_error`, `usage_limit_reached` -> `rate_limit_error`,
+with the upstream message preserved (the full code table is in section 8).
+
+claudex's `response.incomplete` mapping:
+
+| Reason | Anthropic result |
+|---|---|
+| `max_output_tokens` | clean `max_tokens` stop |
+| `content_filter` | clean `refusal` stop |
+| `interrupted` | terminal `overloaded_error` (529), `upstream interrupted the response` |
+| other or missing | terminal `api_error` (500), `upstream response incomplete: <reason or unknown>` |
+
+The error cases emit no `message_stop`; finishing the reducer emits nothing more.
+Non-streaming collection maps those error types to HTTP 529 and 502 respectively.
+Headless Claude Code workers retry overloads; native GPT steps return the error without a
+step-level retry policy. These proxy behaviours are local policy, not Codex source claims.
 
 - The official client does NOT stream function-call arguments; it waits for `output_item.done`. For an Anthropic-style stream we can forward `response.function_call_arguments.delta` (`output_index`, `item_id`, `delta`) as `input_json_delta` — ccp does (`ccp:…/translate/reducer.rs`), keyed by `output_index`, falling back to `arguments` from `.done`/`output_item.done` when no deltas arrived.
 - `response.metadata` side-channels: `headers["x-codex-turn-state"]`, `headers["openai-model"]`, `metadata.openai_verification_recommendation`, `metadata.openai_chatgpt_moderation_metadata`, `metadata.type=="safety_buffering"`. Also any event's `response.headers["openai-model"|"x-openai-model"]` => `ServerModel`.
@@ -236,7 +262,7 @@ Parser: `codex-api/src/sse/responses.rs` `process_sse_with_treatment` + `process
 - `end_turn: bool?` on completed — optional hint; when absent the client infers turn end from absence of tool calls.
 - Rate limits over SSE: **not** an SSE event on the HTTP path. `codex.rate_limits` (`{type, plan_type?, rate_limits:{primary?,secondary?:{used_percent,window_minutes?,reset_at?}}, credits?:{has_credits,unlimited,balance?}, metered_limit_name?, limit_name?}`) is parsed only on the WebSocket path (`codex-api/src/rate_limits.rs` `parse_rate_limit_event`, `endpoint/responses_websocket.rs:756`). On HTTP they arrive as response headers (section 8). ccp tolerates `codex.rate_limits` and a `keepalive` typed event in the SSE stream (CCP-OBSERVED), mapping both to Anthropic `ping`.
 - Keepalive: SSE comment lines are swallowed by the eventsource parser; unknown `type`s are ignored. Idle timeout between events: `stream_idle_timeout` default 300 000 ms (`DEFAULT_STREAM_IDLE_TIMEOUT_MS`) => `"idle timeout waiting for SSE"` (retryable).
-- Stream end: success = `response.completed` seen (client stops reading immediately). If the body ends first => stored `response.failed`/`response.incomplete` error, else `"stream closed before response.completed"` (retryable). There is no `[DONE]` sentinel.
+- Stream end (older source observation): success = `response.completed` seen (client stops reading immediately). If the body ends first => stored `response.failed`/`response.incomplete` error, else `"stream closed before response.completed"` (retryable). There is no `[DONE]` sentinel. claudex also treats top-level `error` and all `response.incomplete` reasons as terminal, as above.
 
 ---
 
@@ -337,8 +363,10 @@ session-id: $SESSION_UUID
 ```json
 {
   "model": "gpt-5.6-sol",
-  "instructions": "You are a coding assistant running inside Claude Code.",
+  "stream": true,
   "input": [
+    {"type": "message", "role": "developer",
+     "content": [{"type": "input_text", "text": "You are a coding assistant running inside Claude Code."}]},
     {"type": "message", "role": "user",
      "content": [{"type": "input_text", "text": "Say hello in one word."}]}
   ],
@@ -347,7 +375,6 @@ session-id: $SESSION_UUID
   "parallel_tool_calls": true,
   "reasoning": {"effort": "low", "summary": "auto"},
   "store": false,
-  "stream": true,
   "include": ["reasoning.encrypted_content"],
   "prompt_cache_key": "$SESSION_UUID",
   "text": {"verbosity": "low"}
@@ -358,8 +385,10 @@ session-id: $SESSION_UUID
 ```json
 {
   "model": "gpt-5.6-sol",
-  "instructions": "You are a coding assistant running inside Claude Code.",
+  "stream": true,
   "input": [
+    {"type": "message", "role": "developer",
+     "content": [{"type": "input_text", "text": "You are a coding assistant running inside Claude Code."}]},
     {"type": "message", "role": "user",
      "content": [{"type": "input_text", "text": "What is in /tmp/a.txt?"}]},
     {"type": "reasoning", "id": "rs_0123", "summary": [],
@@ -388,13 +417,12 @@ session-id: $SESSION_UUID
   "parallel_tool_calls": true,
   "reasoning": {"effort": "medium", "summary": "auto"},
   "store": false,
-  "stream": true,
   "include": ["reasoning.encrypted_content"],
   "prompt_cache_key": "$SESSION_UUID",
   "text": {"verbosity": "low"}
 }
 ```
-First leg of (b) = same body with only the user message in `input`.
+First leg of (b) = same body with only the leading developer message and user message in `input`.
 
 curl (do not run from automation; for manual testing by the user):
 ```sh
@@ -416,7 +444,7 @@ Notes: `summary` may be dropped to match CLI defaults (catalog `default_reasonin
 
 1. **Normal lane for lite-catalog models.** Does `chatgpt.com/backend-api/codex/responses` serve `gpt-5.6-sol/terra` and `gpt-6-astra` without `x-openai-internal-codex-responses-lite`? Source only shows the official client always sets it for them. CCP-OBSERVED says yes for sol (and implicitly terra/astra), no for `gpt-5.6-luna` (404 "Model not found gpt-5.6-luna-free-…", possibly plan-dependent). Needs a live probe by the user. `gpt-5.5`/`gpt-5.4` are non-lite in the catalog and are the safe fallback (haiku-tier has no confirmed non-lite model).
 2. **Originator gating.** Is any lane/model gated on a first-party `originator`/User-Agent? ccp switches to `codex_cli_rs` only for lite, which suggests lite may be; the normal lane demonstrably accepts `claude-code-proxy`. Unknown for `claude-code`.
-3. **Instruction validation.** No client evidence of server-side instruction allowlisting at this commit, and the CLI supports custom instructions; but whether some models/plans still enforce it is server-side. If a 400 mentions instructions, fallback = move the Claude Code system prompt into a leading `developer` message and send short/no `instructions`.
+3. **Instruction validation.** No client evidence of server-side instruction allowlisting in the older source, and the CLI supports custom instructions; whether some models/plans enforce content rules is server-side. claudex already sends the leading `developer` message and no `instructions`, matching the 0.163.0 shape (section 4).
 4. **`reasoning.context` on the normal lane.** Client comment says default is `current_turn`. Whether `context:"all_turns"` is honoured without the lite header, and whether prior-turn reasoning items are dropped silently or cost tokens, is unknown. Also unknown: whether the server rejects a reasoning item whose `id` it cannot resolve when `encrypted_content` is present (official client always sends both, so both together are safe).
 5. **`max_output_tokens` / `temperature`.** Never sent by either client; whether the backend rejects (400 "Unsupported parameter") or ignores them is untested here. Do not send. Consequence: Anthropic `max_tokens` cannot be enforced upstream.
 6. **`tool_choice` object forms** (`{type:"function",name}`, `required`, `none`): official client only ever sends `"auto"`. ccp sends the others (CCP-OBSERVED working).

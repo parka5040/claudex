@@ -2,8 +2,10 @@
 # Manual live regression check; NOT part of make check. Requires Claude Mods, a working
 # claudex proxy/login, an interactive Claude Code login and Python pyte. Uses the real
 # plugin and a native control (adapted from spikes/native-agents/gate/{run-gate.sh,
-# drive.py,step.sh}). Inspect the printed captures: agent rows show types, tool rows
-# appear live, and GPT text appears on step completion, not as it is streamed.
+# drive.py,step.sh}). On Claude Code 2.1.302, inspect the captures: rows show types;
+# /tasks shows the resolved GPT slug (e.g. gpt-6-luna (low)) beside the native model
+# name; tool rows appear live in both views; the claudex status line shows 1 running
+# while the GPT agent runs.
 # Run: bash tests/live/native_agent.sh [headless|panel]
 # Set CLAUDEX_LIVE_KEEP=1 to retain the disposable captures printed below.
 set -euo pipefail
@@ -15,6 +17,7 @@ if [[ $case_name == panel ]]; then
     python3 -c 'import pyte' || { printf 'manual panel check needs Python pyte\n' >&2; exit 2; }
 fi
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/claudex-native-agent.XXXXXXXX") || exit 1
+[[ -n $scratch && -d $scratch ]] || exit 1
 cleanup() { [[ ${CLAUDEX_LIVE_KEEP:-0} == 1 ]] || rm -rf -- "$scratch"; }
 trap cleanup EXIT
 printf 'before: original\n' > "$scratch/sample.txt"
@@ -78,6 +81,19 @@ sent = entered = False
 last_dialog = last_capture = -10.0
 frame = 0
 meta = []
+phase = 'launch'
+phase_since = 0.0
+tasks_frame = ''
+targets = ['claudex:gpt-luna', 'general-purpose']
+target_index = moves = view_captures = 0
+
+def selected():
+    return next((l for l in screen.display if l.lstrip().startswith('❯ ●') or l.lstrip().startswith('❯ ◯')), '')
+
+def advance(value):
+    global phase, phase_since
+    phase = value
+    phase_since = time.monotonic() - start
 
 def key(data, note):
     os.write(master, data)
@@ -97,9 +113,9 @@ def screenshot():
 prompt = (
     'In this SAME response launch exactly TWO Agent calls in parallel, both run_in_background true, '
     'then stop. First: subagent_type claudex:gpt-luna, description GPT native check, '
-    f'prompt "Read {root}/sample.txt, run Bash pwd, Edit that file from before: original to after: gpt, then report. Only work in {root}." '
+    f'prompt "Run Bash `sleep 20` first, then Read {root}/sample.txt, run Bash pwd, Edit that file from before: original to after: gpt, then report. Only work in {root}." '
     'Second: subagent_type general-purpose, description Native control check (inherit the parent model), '
-    f'prompt "Read {root}/control.txt, run Bash pwd, Edit that file from before: original to after: control, then report. Only work in {root}." '
+    f'prompt "Run Bash `sleep 20` first, then Read {root}/control.txt, run Bash pwd, Edit that file from before: original to after: control, then report. Only work in {root}." '
     'Do not do either task yourself.'
 )
 try:
@@ -129,16 +145,47 @@ try:
             time.sleep(1.1)
             key(b'\r', 'send two-agent parent prompt')
             sent = True
-        if sent and elapsed > 20 and not entered and '↓ to manage' in rendered:
-            key(b'\x1b[B', 'open agent selector')
-            entered = True
-        if entered:
-            for sec, sequence, desc in [(23, b'\x1b[B', 'select GPT agent'), (25, b'\r', 'open GPT view'),
-                                        (65, b'\x1b', 'leave GPT view'), (67, b'\x1b[B', 'select control'),
-                                        (69, b'\r', 'open control view')]:
-                flag = f'did-{sec}'
-                if elapsed > sec and not any(flag in event for event in meta):
-                    key(sequence, f'{flag}: {desc}')
+        if phase == 'launch' and sent and '↓ to manage' in rendered and (
+                rendered.count('Backgrounded agent') >= 2 or '2 background agents' in rendered):
+            key(b'/tasks', 'type /tasks after both agents launch')
+            advance('tasks-command')
+        elif phase == 'tasks-command' and elapsed - phase_since > 0.8:
+            key(b'\r', 'show /tasks model labels')
+            advance('tasks')
+        elif phase == 'tasks' and elapsed - phase_since > 1.5 and (
+                'running ·' in rendered or 'Background tasks' in rendered or 'Tasks' in rendered):
+            tasks_frame = screenshot()
+            (root / 'panel-tasks.txt').write_text(tasks_frame + '\n')
+            key(b'\x1b', 'close /tasks')
+            advance('selector-open')
+        elif phase == 'selector-open' and elapsed - phase_since > 0.8:
+            key(b'\x1b[B', f'open selector for {targets[target_index]}')
+            moves = 0
+            advance('selector')
+        elif phase == 'selector' and elapsed - phase_since > 0.5:
+            row = selected()
+            if targets[target_index] in row:
+                screenshot()
+                key(b'\r', f'open {targets[target_index]} view')
+                entered = True
+                view_captures = 0
+                advance('view')
+            elif row:
+                if moves >= 40:
+                    raise SystemExit(f'cannot select {targets[target_index]}: {row}')
+                key(b'\x1b[B', f'seek {targets[target_index]} from {row.strip()}')
+                moves += 1
+                phase_since = elapsed
+        elif phase == 'view' and elapsed - last_capture >= 3:
+            screenshot()
+            view_captures += 1
+            if view_captures >= 3:
+                key(b'\x1b', f'leave {targets[target_index]} view')
+                target_index += 1
+                if target_index == len(targets):
+                    advance('done')
+                    break
+                advance('selector-open')
         if elapsed - last_capture >= 3:
             screenshot()
 finally:
@@ -159,6 +206,10 @@ finally:
     print('\n'.join(meta))
     print('GPT scratch:', (root / 'sample.txt').read_text().strip())
     print('Control scratch:', (root / 'control.txt').read_text().strip())
-    if not sent or not entered:
-        raise SystemExit('live panel check incomplete; inspect captures')
+    print('/tasks running rows:')
+    for line in tasks_frame.splitlines():
+        if 'running ·' in line:
+            print(line.rstrip())
+    if phase != 'done':
+        raise SystemExit(f'live panel check incomplete ({phase}); inspect captures')
 PY

@@ -4,3 +4,4 @@ spikes/raw/
 *.capture
 .cache/
 plugin/.claude-plugin/types/
+plugin/tsconfig.json

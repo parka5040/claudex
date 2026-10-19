@@ -75,7 +75,7 @@ EOF
 chmod +x "$TMP/bin/claude"
 cat > "$TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
-printf 'codex-cli 0.161.0\n'
+printf 'codex-cli 0.163.0\n'
 EOF
 chmod +x "$TMP/bin/codex"
 cat > "$TMP/bin/proxy" <<EOF
@@ -137,7 +137,7 @@ contains "fallback lineup on healthz" "$(health)" '"sol":"gpt-6.1-sol"'
 contains "status prints model mapping" "$(w "$W" status)" "models: luna=gpt-6-luna sol=gpt-6.1-sol astra=gpt-6-astra (fallback)"
 contains "SessionStart policy includes model mapping" "$(w "$W" policy-line)" "models: luna=gpt-6-luna sol=gpt-6.1-sol astra=gpt-6-astra (fallback)"
 check "status JSON has models" "$(w "$W" status --json | jq -r '.models.sol')" "gpt-6.1-sol"
-check "installed CLI version passed to proxy" "$(< "$TMP/versions")" "0.161.0"
+check "installed CLI version passed to proxy" "$(< "$TMP/versions")" "0.163.0"
 pid1=$(health | jq -r .pid)
 
 echo "  second run reuses it"
@@ -291,13 +291,13 @@ MODEL_PROXY_PORT=$(free_port) || fail_setup "cannot select model proxy port"
    "$MODEL_PROXY_PORT" != "$UP_PORT" && "$MODEL_PROXY_PORT" != "$PORT" ]] || fail_setup "model test ports overlap"
 python3 "$TMP/model_backend.py" "$MODEL_BACKEND_PORT" "$ROOT/tests/fixtures/models-2026-10-03.json" "$TMP/model_backend.log" & MODEL_BACKEND_PID=$!
 for _ in $(seq 50); do
-    curl -fsS -m 1 "http://127.0.0.1:$MODEL_BACKEND_PORT/backend-api/codex/models?client_version=0.161.0" >/dev/null 2>&1 && break
+    curl -fsS -m 1 "http://127.0.0.1:$MODEL_BACKEND_PORT/backend-api/codex/models?client_version=0.163.0" >/dev/null 2>&1 && break
     sleep 0.1
 done
 child_is_running "$MODEL_BACKEND_PID" || fail_setup "model backend did not start"
 [[ -s "$TMP/model_backend.log" ]] || fail_setup "model backend did not answer"
 : > "$TMP/model_backend.log"
-ASAN_OPTIONS=detect_leaks=0 CLAUDEX_INSTANCE=modeltest CLAUDEX_CODEX_VERSION=0.161.0 \
+ASAN_OPTIONS=detect_leaks=0 CLAUDEX_INSTANCE=modeltest CLAUDEX_CODEX_VERSION=0.163.0 \
     CLAUDEX_TEST_UPSTREAM="http://127.0.0.1:$MODEL_BACKEND_PORT/backend-api/codex/responses" \
     "$ROOT/build/claudex-proxy-test" --port "$MODEL_PROXY_PORT" --auth-file "$TMP/.codex/auth.json" \
     > "$TMP/model_proxy.log" 2>&1 & MODEL_PROXY_PID=$!
@@ -314,7 +314,7 @@ model_health=$(curl -fsS -m 1 "$MODEL_URL/healthz") || fail_setup "model proxy i
 check "fixture installed under the proxy sandbox" "$source" backend
 check "backend sol is the latest served model" "$(curl -fsS -m 1 "$MODEL_URL/healthz" | jq -r '.models.sol')" gpt-6.1-sol
 check "only three current families are advertised" "$(curl -fsS -m 1 "$MODEL_URL/v1/models" | jq -r '[.data[].id] | join(",")')" gpt-6-luna,gpt-6.1-sol,gpt-6-astra
-contains "fetch uses installed Codex version and honest header" "$(< "$TMP/model_backend.log")" 'GET /backend-api/codex/models?client_version=0.161.0 originator=claude-code accept=application/json'
+contains "fetch uses installed Codex version and honest header" "$(< "$TMP/model_backend.log")" 'GET /backend-api/codex/models?client_version=0.163.0 originator=claude-code accept=application/json'
 unknown='{"model":"gpt-pluto","messages":[{"role":"user","content":"hi"}]}'
 code=$(curl -sS -m 5 -o "$TMP/model_response" -w '%{http_code}' -H 'content-type: application/json' --data "$unknown" "$MODEL_URL/v1/messages")
 check "unknown family is rejected" "$code" 404

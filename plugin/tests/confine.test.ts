@@ -94,6 +94,26 @@ test('background, read-only, unknown and null-metadata GPT Bash fail closed', as
     .toEqual({ deny: 'claudex: could not classify agent unknown-bash; retry' })
 })
 
+test('read-mode GPT agents cannot Write or Edit even inside their cwd', async ($, on) => {
+  const h = harness(on, { status, jobs: [] })
+  await start($)
+  live.agents = { readFiles: agent('/r', 'read') }
+  const { handlers } = hooks()
+  const forbidden = new Proxy({}, { get() { throw new Error('read-only mutation used a capability') } }) as EngineInterface
+  let forwards = 0
+  const forward = async () => { forwards++; return { result: 'read' } }
+  for (const tool of ['Write', 'Edit']) {
+    expect(await handlers.get(tool)!(forbidden, { tool, agentId: 'readFiles', file_path: '/r/a' }, forward))
+      .toEqual({ deny: `claudex: ${tool} is not available to read-only GPT agents` })
+  }
+  expect(forwards).toBe(0)
+  const before = h.calls.length
+  expect(await handlers.get('Read')!(engineFor($, h), { tool: 'Read', agentId: 'readFiles', file_path: '/r/a' }, forward))
+    .toEqual({ result: 'read' })
+  expect(forwards).toBe(1)
+  expect(h.calls.slice(before).map(c => c.argv.slice(1))).toEqual([['resolve', '--cwd', '/r', '/r/a']])
+})
+
 test('lexical path containment handles absolute, relative, dot segments and directory siblings', () => {
   for (const [path, allowed] of [
     ['/r/a', true], ['/r/../x', false], ['/r2', false], ['a/b', true], ['../x', false], ['/r', true],

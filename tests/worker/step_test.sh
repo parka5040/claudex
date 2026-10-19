@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercises step and admit with an isolated stub proxy and no real credentials.
+# Exercises step, admit and model with an isolated stub proxy and no real credentials.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -69,7 +69,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != '/healthz':
             self.send_error(404)
             return
-        body = b'{"service":"claudex-proxy","instance":"step-test-nonce"}'
+        with (root / 'health-requests').open('a') as log:
+            log.write(self.path + '\n')
+        body = json.dumps({'service': 'claudex-proxy',
+                           'instance': 'foreign' if (root / 'foreign').exists() else 'step-test-nonce',
+                           'models': {'sol': (root / 'model').read_text() if (root / 'model').exists() else 'gpt-6.1-sol'}},
+                          separators=(',', ':')).encode()
         self.send_response(200)
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
@@ -203,6 +208,42 @@ check 'TERM step exit' "$rc" 143
 check 'TERM removes step input' "$(compgen -G "$TMP/state/.step-input.*" || true)" ''
 check 'TERM removes step request' "$(compgen -G "$TMP/state/.step-request.*" || true)" ''
 : > "$TMP/release"
+
+printf '  model probes the owned proxy after policy checks\n'
+for tier in sol terra; do
+    out=$(w "$W" model "$tier" 2> "$TMP/err"); rc=$?
+    check "model $tier exit" "$rc" 0
+    check "model $tier label" "$out" '{"model":"gpt-6.1-sol"}'
+done
+unused_port=$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+out=$(w CLAUDEX_PORT="$unused_port" CLAUDEX_TEST_SKIP_PROXY=1 "$W" model sol 2> "$TMP/err"); rc=$?
+check 'model unavailable exit' "$rc" 0
+check 'model unavailable is silent' "$out" ''
+health_before=$(wc -l < "$TMP/health-requests")
+out=$(w CLAUDEX=off "$W" model sol 2> "$TMP/err"); rc=$?
+check 'model disabled switch exit' "$rc" 3
+check 'model disabled switch stdout' "$out" ''
+check 'model disabled switch never touches proxy' "$(wc -l < "$TMP/health-requests")" "$health_before"
+out=$(w CLAUDEX_TIERS=luna "$W" model sol 2> "$TMP/err"); rc=$?
+check 'model disabled tier exit' "$rc" 4
+check 'model disabled tier stdout' "$out" ''
+check 'model disabled tier never touches proxy' "$(wc -l < "$TMP/health-requests")" "$health_before"
+for args in '' adversary pluto 'sol extra'; do
+    read -r -a model_args <<< "$args"
+    out=$(w "$W" model "${model_args[@]}" 2> "$TMP/err"); rc=$?
+    check "model bad usage $args exit" "$rc" 2
+    check "model bad usage $args stdout" "$out" ''
+done
+: > "$TMP/foreign"
+out=$(w "$W" model sol 2> "$TMP/err"); rc=$?
+check 'model foreign proxy exit' "$rc" 0
+check 'model foreign proxy is silent' "$out" ''
+rm "$TMP/foreign"
+printf '%s' 'sonnet; rm' > "$TMP/model"
+out=$(w "$W" model sol 2> "$TMP/err"); rc=$?
+check 'model invalid slug exit' "$rc" 0
+check 'model invalid slug is silent' "$out" ''
+rm "$TMP/model"
 
 printf '  admit combines agent count with running worker jobs\n'
 out=$(w "$W" admit sol --running 0 2>&1); check 'admit zero exit' "$?" 0
