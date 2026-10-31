@@ -149,7 +149,7 @@ check "GET unknown path" "$(curl -sS -m 2 -o /dev/null -w '%{http_code}' "$PX/")
 out=$(post /v1/messages/count_tokens "$MSG_NOSTREAM");              check "count_tokens status" "$(status)" "200"
 check "count_tokens positive" "$(jq -r '.input_tokens > 0' <<<"$out")" "true"
 check "models list" "$(curl -sS -m 2 "$PX/v1/models" | jq -r '.data | map(.id) | join(",")')" \
-    "gpt-6-luna,gpt-6.1-sol,gpt-6-astra"
+    "gpt-6-luna,gpt-6.1-sol,gpt-6-astra,gpt-6.1-terra"
 
 echo "  concurrent requests"
 set_mode slow

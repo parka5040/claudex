@@ -153,18 +153,18 @@ test('cold off registers only command; config on/off re-arms and effective chang
 test('status shows resolved models and deprecation notes from worker status JSON', async ($, on) => {
   const s = status()
   s.models = { luna: 'gpt-6-luna', sol: 'gpt-6.1-sol', astra: 'gpt-6-astra',
-    terra: 'gpt-6.1-sol', source: 'backend', fetched_age_s: 28 }
-  s.deprecations = ['terra is deprecated (served by sol)']
+    terra: 'gpt-6.1-terra', source: 'backend', fetched_age_s: 28 }
+  s.deprecations = ['gpt-example is deprecated']
   harness(on, { status: s, jobs: [] })
   await start($)
   const response = await command($, 'status')
-  expect(response.text).toContain('Models: luna=gpt-6-luna sol=gpt-6.1-sol astra=gpt-6-astra (backend)')
-  expect(response.text).toContain('terra is deprecated (served by sol)')
+  expect(response.text).toContain('Models: luna=gpt-6-luna sol=gpt-6.1-sol astra=gpt-6-astra terra=gpt-6.1-terra (backend)')
+  expect(response.text).toContain('gpt-example is deprecated')
   s.models = null
   s.deprecations = []
   const missing = await command($, 'status')
   expect(missing.text).not.toContain('Models:')
-  expect(missing.text).not.toContain('terra is deprecated')
+  expect(missing.text).not.toContain('gpt-example is deprecated')
 })
 
 test('config shows policy sources, writes argv, distinguishes env shadowing, and rejects unknown', async ($, on) => {

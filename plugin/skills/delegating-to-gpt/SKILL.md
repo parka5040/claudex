@@ -12,7 +12,7 @@ responsible for the result.
 
 ## In the main session (claudex mod loaded)
 
-Dispatch work with the **Agent tool**, `subagent_type: "claudex:gpt-<tier>"` (luna, sol or
+Dispatch work with the **Agent tool**, `subagent_type: "claudex:gpt-<tier>"` (luna, terra, sol or
 astra). Run in the background by default; the Agent tool's task notification delivers the
 result. Give the agent a complete, self-contained brief: goal, exact paths, constraints,
 done-criteria and verification command. The agent has the spawn prompt and its session's files,
@@ -46,10 +46,11 @@ workers. If blocked, report it to the user; do not work around it.
 | TIER | Use for |
 |---|---|
 | `luna` | extraction, classification and summaries; not for writing code |
-| `sol` | all code writing: implementation, tests, refactors, mechanical edits, debugging; default worker |
+| `terra` | straightforward, well-specified code: mechanical edits, small fixes, tests from an exact spec |
+| `sol` | complex multi-file implementation, refactors and debugging; any code task that is not clearly straightforward; default worker |
 | `astra` | architectural review and peer-level second opinions; not for writing code |
 
-`terra` is deprecated and served by sol. Send every code-writing task to `sol`, even a mechanical one; brief `astra` to review, not to edit files. The adversary is a
+Send contained, well-specified code to `terra`; send complex multi-file implementation, refactors and debugging to `sol`; when unsure, `sol`. Brief `astra` to review, not to edit files. The adversary is a
 separate read-only review using `CLAUDEX_ADVERSARY_MODEL` (default `gpt-astra@xhigh`), not a
 `claudex:gpt-adversary` agent.
 
@@ -73,7 +74,7 @@ separate read-only review using `CLAUDEX_ADVERSARY_MODEL` (default `gpt-astra@xh
 
 The mod refuses `claudex:gpt-*` as Workflow agents, so Workflow scripts use the `claudex:relay-*` couriers.
 
-Workflows use courier agents `claudex:relay-luna`, `claudex:relay-sol`,
+Workflows use courier agents `claudex:relay-luna`, `claudex:relay-terra`, `claudex:relay-sol`,
 `claudex:relay-astra`, or `claudex:relay-adversary` (Workflow agent ids are not names the mod
 registers). In a Mods-off session, those relays or Bash can dispatch a headless worker:
 

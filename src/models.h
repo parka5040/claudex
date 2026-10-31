@@ -25,7 +25,7 @@ void models_mark_rejected(const char *slug);
 void models_catalog_fetch_failed(void); /* failed network fetch selects fallback, retaining catalog */
 typedef struct {
     char family[4][MODEL_SLUG_MAX]; /* luna, sol, astra, terra; empty if unavailable */
-    int current[4];                 /* usable newest generation, or non-deprecated fallback */
+    int current[4];                 /* usable newest generation, or unrejected fallback */
     int from_backend;
     long loaded_at;
 } models_view_t;

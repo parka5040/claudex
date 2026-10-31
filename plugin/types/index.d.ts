@@ -1,12 +1,12 @@
 // Keep the published state contract self-contained; it mirrors hooks/agents.ts.
 export type ClaudexAgent = {
-  tier: 'luna' | 'sol' | 'astra'; cwd: string | null; prompt: string | null; mode: 'read' | 'edit'; model: string
+  tier: 'luna' | 'terra' | 'sol' | 'astra'; cwd: string | null; prompt: string | null; mode: 'read' | 'edit'; model: string
   final: string | null
   thinking: Record<string, { type: 'thinking'; thinking: string; signature: string }[]>
 }
 
 export type ClaudexRetained = {
-  tier: 'luna' | 'sol' | 'astra'; cwd: string; mode: 'read' | 'edit'; prompt: string | null
+  tier: 'luna' | 'terra' | 'sol' | 'astra'; cwd: string; mode: 'read' | 'edit'; prompt: string | null
 }
 
 export type ClaudexJobState = 'running' | 'done' | 'failed' | 'cancelled' | 'lost' | 'missing'

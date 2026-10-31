@@ -1,7 +1,7 @@
 {
   "name": "claudex",
   "description": "Opt-in GPT layer for Claude Code: GPT-6.1 and GPT-6 models as native subagents, headless workers and an adversarial reviewer, via a local sidecar proxy. Claude-native behaviour is untouched; nothing GPT happens unless the user asks.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "types": "./types/index.d.ts",
   "author": {
     "name": "parka5040"

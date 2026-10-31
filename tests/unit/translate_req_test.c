@@ -74,7 +74,7 @@ TEST(model_suffix_and_body_effort_resolve_through_models) {
     CHECK_STR(t.x.client_model, "gpt-6-astra@ultra[1m]");
     tr_free(&t);
     t = tr("{\"model\":\"gpt-5.6-terra\",\"output_config\":{\"effort\":\"max\"}," USER_HI "}");
-    CHECK_STR(S(&t, "/model"), "gpt-6.1-sol");
+    CHECK_STR(S(&t, "/model"), "gpt-6.1-terra");
     CHECK_STR(S(&t, "/reasoning/effort"), "max");
     tr_free(&t);
     t = tr("{\"model\":\"gpt-sol\"," USER_HI "}");
@@ -88,6 +88,7 @@ TEST(unknown_gpt_model_is_404_and_bad_effort_is_400) {
     CHECK(strstr(t.err, "gpt-6.1-sol") != NULL);
     CHECK(strstr(t.err, "gpt-6-luna") != NULL);
     CHECK(strstr(t.err, "gpt-6-astra") != NULL);
+    CHECK(strstr(t.err, "gpt-6.1-terra") != NULL);
     CHECK(strstr(t.err, "gpt-5.6-terra") == NULL);
     tr_free(&t);
     t = tr("{\"model\":\"gpt-6-sol@turbo\"," USER_HI "}");

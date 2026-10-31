@@ -44,7 +44,7 @@ test('agent type registration uses enabled tiers, GPT model aliases and mode-spe
   const s = status(true, 'luna,terra,astra', 'read')
   const h = harness(on, { status: s, jobs: [] })
   await start($)
-  expect(h.agents.map(a => a.name)).toEqual(['gpt-luna', 'gpt-sol', 'gpt-astra'])
+  expect(h.agents.map(a => a.name)).toEqual(['gpt-luna', 'gpt-terra', 'gpt-astra'])
   for (const a of h.agents) {
     expect(a.model).toBe(`gpt-${a.name.slice(4)}`)
     expect(a).toMatchObject({ maxTurns: 200 })
@@ -52,9 +52,9 @@ test('agent type registration uses enabled tiers, GPT model aliases and mode-spe
     expect(a.prompt).toBe(READ_PROMPT)
     expect(a.description).toContain('Runs on GPT through claudex; use only when the claudex policy or the user permits GPT.')
   }
-  expect(h.agents.map(a => a.effort)).toEqual(['low', 'high', 'xhigh'])
+  expect(h.agents.map(a => a.effort)).toEqual(['low', 'medium', 'xhigh'])
   expect(tierOf('claudex:gpt-sol')).toBe('sol')
-  expect(tierOf('claudex:gpt-terra')).toBeNull()
+  expect(tierOf('claudex:gpt-terra')).toBe('terra')
   expect(tierOf('not-claudex:gpt-sol')).toBeNull()
   expect(toolsFor('edit')).toEqual(['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'])
   s.policy.CLAUDEX_WORKER_MODE = 'edit'
@@ -66,6 +66,36 @@ test('agent type registration uses enabled tiers, GPT model aliases and mode-spe
   await command($, 'CLAUDEX_TIERS', 'sol')
   expect(h.agents.at(-1)?.name).toBe('gpt-sol')
   expect(h.tools).toEqual(['review', 'verdict'])
+})
+
+test('the default four tiers register in order with role descriptions', async ($, on) => {
+  const h = harness(on, { status: status(true, 'luna,terra,sol,astra'), jobs: [] })
+  await start($)
+  expect(h.agents.map(a => a.name)).toEqual(['gpt-luna', 'gpt-terra', 'gpt-sol', 'gpt-astra'])
+  expect(h.agents.map(a => a.effort)).toEqual(['low', 'medium', 'high', 'xhigh'])
+  const described = Object.fromEntries(h.agents.map(a => [a.name, a.description]))
+  expect(described['gpt-terra']).toContain('Straightforward, well-specified code: mechanical edits, small fixes and tests from an exact spec; complex multi-file work and debugging go to sol.')
+  expect(described['gpt-sol']).toContain('Complex multi-file implementation, refactors and debugging, and any code task that is not clearly straightforward.')
+})
+
+test('a terra spawn probes and admits terra; a workflow terra spawn names relay-terra', async ($, on) => {
+  const h = harness(on, { status: status(true, 'luna,terra,sol,astra'), jobs: [] })
+  const forwarded: AgentSpawnInput[] = []
+  on('agent.spawn', ($, e) => { forwarded.push(e); return { model: e.model ?? 'missing', agentId: 'terra-1' } })
+  await start($)
+  h.opts.route = c => c.argv[1] === 'status' ? stub(JSON.stringify(h.opts.status)) : stub('')
+  expect(await spawn($, 'claudex:gpt-terra')).toEqual({ model: 'gpt-terra', agentId: 'terra-1' })
+  expect(h.calls.find(c => c.argv[1] === 'model')?.argv.slice(1)).toEqual(['model', 'terra'])
+  expect(h.calls.find(c => c.argv[1] === 'admit')?.argv.slice(1)).toEqual(['admit', 'terra', '--running', '0'])
+  expect(await $.agent.spawn({
+    subagentType: 'claudex:gpt-terra', prompt: 'x', description: 'x', tool_use_id: 'toolu_wf_terra',
+    provider: { plugin: 'claudex', tier: 'user' }, parentModel: 'claude-sonnet-4', background: false, fork: false,
+    workflow: { runId: 'wf_terra', agentIndex: 1 },
+  })).toEqual({ deny: 'claudex: GPT agent types cannot run as Workflow agents; use claudex:relay-terra in Workflow scripts' })
+  expect(forwarded).toHaveLength(1)
+  await h.clock.settle()
+  expect((h.state.get('claudex:retained')?.value as Record<string, unknown>)['terra-1'])
+    .toEqual({ tier: 'terra', cwd: '/repo', mode: 'edit', prompt: 'Build the module' })
 })
 
 test('both worker prompts end with the explicit handback instruction', () => {
@@ -648,7 +678,7 @@ test('spawn label comes from the model probe, then status models, then the alias
   expect(calls[0]?.init?.timeoutMs).toBe(5000)
   expect(modelRequest('/plugin', 'sol')).toEqual({ argv: ['/plugin/bin/claudex-worker', 'model', 'sol'], init: { timeoutMs: 5000 } })
   probe = ''
-  s.models = { luna: 'gpt-6-luna', sol: 'gpt-6.1-sol', astra: 'gpt-6-astra', terra: 'gpt-6.1-sol', source: 'backend', fetched_age_s: 1 }
+  s.models = { luna: 'gpt-6-luna', sol: 'gpt-6.1-sol', astra: 'gpt-6-astra', terra: 'gpt-6.1-terra', source: 'backend', fetched_age_s: 1 }
   await command($, 'CLAUDEX_WORKER_MODE', 'edit')
   await spawn($, 'claudex:gpt-sol')
   expect(forwarded.at(-1)?.model).toBe('gpt-6.1-sol')
@@ -665,7 +695,7 @@ test('spawn label comes from the model probe, then status models, then the alias
     live.status = s
     expect(modelLabel('sol', '{"model":"gpt-6.1-sol"}\n')).toBe('gpt-6.1-sol')
     for (const bad of ['', '{bad', '{"model":"sonnet; rm"}', '{"model":42}', '{"model":"gpt-"}']) expect(modelLabel('sol', bad)).toBe('gpt-sol')
-    s.models = { luna: 'gpt-6-luna', sol: 'gpt-6.1-sol', astra: 'gpt-6-astra', terra: 'gpt-6.1-sol', source: 'backend', fetched_age_s: 1 }
+    s.models = { luna: 'gpt-6-luna', sol: 'gpt-6.1-sol', astra: 'gpt-6-astra', terra: 'gpt-6.1-terra', source: 'backend', fetched_age_s: 1 }
     expect(modelLabel('sol', '')).toBe('gpt-6.1-sol')
     s.models.sol = 'invalid'
     expect(modelLabel('sol', '')).toBe('gpt-sol')

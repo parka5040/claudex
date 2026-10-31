@@ -134,8 +134,8 @@ check "proxy now up" "$(health | jq -r .service)" "claudex-proxy"
 check "proxy instance matches the launcher's record" "$(health | jq -r .instance)" "$(cat "$TMP/state/instance" 2>/dev/null)"
 check "instance file is private" "$(stat -c %a "$TMP/state/instance" 2>/dev/null)" "600"
 contains "fallback lineup on healthz" "$(health)" '"sol":"gpt-6.1-sol"'
-contains "status prints model mapping" "$(w "$W" status)" "models: luna=gpt-6-luna sol=gpt-6.1-sol astra=gpt-6-astra (fallback)"
-contains "SessionStart policy includes model mapping" "$(w "$W" policy-line)" "models: luna=gpt-6-luna sol=gpt-6.1-sol astra=gpt-6-astra (fallback)"
+contains "status prints model mapping" "$(w "$W" status)" "models: luna=gpt-6-luna sol=gpt-6.1-sol astra=gpt-6-astra terra=gpt-6.1-terra (fallback)"
+contains "SessionStart policy includes model mapping" "$(w "$W" policy-line)" "models: luna=gpt-6-luna sol=gpt-6.1-sol astra=gpt-6-astra terra=gpt-6.1-terra (fallback)"
 check "status JSON has models" "$(w "$W" status --json | jq -r '.models.sol')" "gpt-6.1-sol"
 check "installed CLI version passed to proxy" "$(< "$TMP/versions")" "0.163.0"
 pid1=$(health | jq -r .pid)

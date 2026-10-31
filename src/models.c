@@ -14,8 +14,17 @@
 enum { LUNA, SOL, ASTRA, TERRA, FAMILIES };
 static const char *const NAMES[] = { "luna", "sol", "astra", "terra" };
 static const char *const DEFAULTS[] = { "low", "high", "xhigh", "medium" };
-static const char *const FALLBACK[] = { "gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-sol" };
+static const char *const FALLBACK[] = { "gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-terra" };
 static const char *const EFFORTS[] = { "low", "medium", "high", "xhigh", "max", "ultra" };
+
+/* Accepted as names, never resolved to; retirement outranks the generation rule. */
+static const char *const RETIRED[] = { "gpt-5.6-terra" };
+
+static int retired_slug(const char *slug) {
+    for (size_t i = 0; i < sizeof RETIRED / sizeof RETIRED[0]; i++)
+        if (!strcmp(slug, RETIRED[i])) return 1;
+    return 0;
+}
 
 typedef struct {
     char slug[MODEL_SLUG_MAX];
@@ -77,7 +86,7 @@ int models_catalog_load(const char *json, size_t len) {
         const char *slug = yyjson_get_str(yyjson_obj_get(item, "slug"));
         if (!visibility || strcmp(visibility, "list") || !yyjson_is_true(yyjson_obj_get(item, "supported_in_api")) || !slug) continue;
         row_t row;
-        if (parse_slug(slug, yyjson_get_len(yyjson_obj_get(item, "slug")), &row) != 0) continue;
+        if (parse_slug(slug, yyjson_get_len(yyjson_obj_get(item, "slug")), &row) != 0 || retired_slug(row.slug)) continue;
         next->rows[next->count++] = row;
     }
     yyjson_doc_free(doc);
@@ -140,7 +149,7 @@ static void view_locked(models_view_t *out) {
                       (rejected(FALLBACK[SOL]) ? NULL : FALLBACK[SOL]);
     for (int i = LUNA; i < FAMILIES; i++) {
         out->current[i] = out->from_backend ? (best[i] && best[i]->major == newest) :
-                          (i != TERRA && !rejected(FALLBACK[i]));
+                          !rejected(FALLBACK[i]);
         const char *slug = out->current[i] ?
                            (out->from_backend ? best[i]->slug : FALLBACK[i]) : sol;
         if (slug) memcpy(out->family[i], slug, strlen(slug) + 1);

@@ -3,7 +3,7 @@ import { contextCurrent, currentToken, isCurrent, live, onEnable, onPolicyChange
 import { READ_PROMPT, WRITE_PROMPT } from './prompts.ts'
 import { admitRequest, modelRequest } from './worker.ts'
 
-export type Tier = 'luna' | 'sol' | 'astra'
+export type Tier = 'luna' | 'terra' | 'sol' | 'astra'
 export type ThinkingBlock = { type: 'thinking'; thinking: string; signature: string }
 export type ClaudexAgent = {
   tier: Tier; cwd: string | null; prompt: string | null; mode: 'read' | 'edit'; model: string
@@ -11,13 +11,14 @@ export type ClaudexAgent = {
   thinking: Record<string, ThinkingBlock[]>
 }
 export const AGENT_PREFIX = 'claudex:gpt-'
-const tiers: Tier[] = ['luna', 'sol', 'astra']
+const tiers: Tier[] = ['luna', 'terra', 'sol', 'astra']
 const descriptions: Record<Tier, string> = {
   luna: 'Extraction, classification and summaries from an exact spec; not for writing code.',
-  sol: 'All code writing: implementation, tests, refactors, mechanical edits and debugging.',
+  terra: 'Straightforward, well-specified code: mechanical edits, small fixes and tests from an exact spec; complex multi-file work and debugging go to sol.',
+  sol: 'Complex multi-file implementation, refactors and debugging, and any code task that is not clearly straightforward.',
   astra: 'Architectural review and peer-level second opinions; not for writing code.',
 }
-const efforts: Record<Tier, string> = { luna: 'low', sol: 'high', astra: 'xhigh' }
+const efforts: Record<Tier, string> = { luna: 'low', terra: 'medium', sol: 'high', astra: 'xhigh' }
 const LIVE = new Set(['pending', 'running', 'waiting', 'idle'])
 const ACTIVE = new Set(['pending', 'running', 'waiting'])
 export const isLive = (status: string): boolean => LIVE.has(status)
@@ -81,8 +82,7 @@ function mode(): 'read' | 'edit' { return live.status?.policy.CLAUDEX_WORKER_MOD
 function enabled(tier: Tier): boolean {
   const policy = live.status?.policy
   if (policy?.CLAUDEX !== 'on') return false
-  const configured = (policy.CLAUDEX_TIERS ?? '').split(',')
-  return configured.includes(tier) || tier === 'sol' && configured.includes('terra')
+  return (policy.CLAUDEX_TIERS ?? '').split(',').includes(tier)
 }
 function entry(tier: Tier, cwd: string | null, prompt: string | null, access = mode(), model = `gpt-${tier}`): ClaudexAgent {
   return { tier, cwd, prompt, mode: access, model, final: null, thinking: {} }

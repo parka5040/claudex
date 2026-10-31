@@ -73,7 +73,8 @@ class Handler(BaseHTTPRequestHandler):
             log.write(self.path + '\n')
         body = json.dumps({'service': 'claudex-proxy',
                            'instance': 'foreign' if (root / 'foreign').exists() else 'step-test-nonce',
-                           'models': {'sol': (root / 'model').read_text() if (root / 'model').exists() else 'gpt-6.1-sol'}},
+                           'models': {'sol': (root / 'model').read_text() if (root / 'model').exists() else 'gpt-6.1-sol',
+                                      'terra': 'gpt-6.1-terra'}},
                           separators=(',', ':')).encode()
         self.send_response(200)
         self.send_header('Content-Length', str(len(body)))
@@ -210,10 +211,11 @@ check 'TERM removes step request' "$(compgen -G "$TMP/state/.step-request.*" || 
 : > "$TMP/release"
 
 printf '  model probes the owned proxy after policy checks\n'
-for tier in sol terra; do
+for variant in 'sol gpt-6.1-sol' 'terra gpt-6.1-terra'; do
+    tier=${variant%% *} label=${variant#* }
     out=$(w "$W" model "$tier" 2> "$TMP/err"); rc=$?
     check "model $tier exit" "$rc" 0
-    check "model $tier label" "$out" '{"model":"gpt-6.1-sol"}'
+    check "model $tier label" "$out" "{\"model\":\"$label\"}"
 done
 unused_port=$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
 out=$(w CLAUDEX_PORT="$unused_port" CLAUDEX_TEST_SKIP_PROXY=1 "$W" model sol 2> "$TMP/err"); rc=$?

@@ -10,12 +10,12 @@ Decisions (user, 2026-09-18):
 |---|---|
 | Architecture | **Sidecar workers.** Main Fable session is plain first-party `claude` with **no proxy** → Remote Control/phone, push notifications, auto mode, plan mode, skip-permissions, tool search, 1M, fast mode all untouched. GPT tiers run as child headless Claude Code processes (`claude -p --model <gpt slug>`) pointed at a local GPT-only proxy |
 | Proxy | **Our own, written in C.** No third-party code touches a credential. GPT-only: no Claude passthrough, and the Claude credential never reaches it (child gets a dummy `ANTHROPIC_AUTH_TOKEN`, which per docs replaces the subscription login for that process) |
-| Tiers | `luna`, `sol`, `astra` via family aliases resolved by the proxy's current catalog; the fallback table is `gpt-6-luna`, `gpt-6.1-sol`, `gpt-6-astra`. Terra is deprecated and resolves to sol. |
+| Tiers | `luna`, `terra`, `sol`, `astra` via family aliases resolved by the proxy's current catalog; the fallback table is `gpt-6-luna`, `gpt-6.1-terra`, `gpt-6.1-sol`, `gpt-6-astra`. `gpt-5.6-terra` is retired and never requested. |
 | Client identity | Honest: identifies as Claude Code (third-party harness). Never `codex_cli_rs` or `x-openai-internal-*`. Backend refuses → STOP and report |
 | Claude-native | Must remain fully intact and is the default. GPT is opt-in, in two roles (subagent, adversary), **fully user-controllable by prompt, slash command, config file, or CLI/env** |
 
 ### Main-session invariants (tested in Verification 1)
-claudex never sets, in the main session: `ANTHROPIC_*`, `CLAUDE_CODE_SUBAGENT_MODEL(_FORCE)`, `ANTHROPIC_DEFAULT_*_MODEL` alias remaps, `model`/`modelSettings`/`agent` settings, or anything that shadows a built-in agent type. It adds only: new agent types (`claudex:gpt-luna|sol|astra` while enabled, plus `claudex:relay-*` couriers), new namespaced skills/commands, one SessionStart hook that prints a one-line policy, and optional permission rules. Disable the plugin → Claude Code is byte-for-byte what it was.
+claudex never sets, in the main session: `ANTHROPIC_*`, `CLAUDE_CODE_SUBAGENT_MODEL(_FORCE)`, `ANTHROPIC_DEFAULT_*_MODEL` alias remaps, `model`/`modelSettings`/`agent` settings, or anything that shadows a built-in agent type. It adds only: new agent types (`claudex:gpt-luna|terra|sol|astra` while enabled, plus `claudex:relay-*` couriers), new namespaced skills/commands, one SessionStart hook that prints a one-line policy, and optional permission rules. Disable the plugin → Claude Code is byte-for-byte what it was.
 
 The Claude Mod follows F1–F8: it hooks session start, review/verdict and file-path tool calls,
 `/claudex`, two panes, GPT agent offers/spawns and `turn.step` (F1). Worker actions use argv
@@ -37,7 +37,7 @@ Heads-up (not touched): `~/.config/claude-code-proxy/codex/auth.json` (2026-09-1
 ### 1. `claudex-proxy` (C17; libcurl + yyjson + pthreads + libseccomp; Makefile)
 Surface: `POST /v1/messages` (stream + non-stream), `POST /v1/messages/count_tokens` (local estimate), `GET /v1/models`, `GET /healthz`; all else 404. Binds `127.0.0.1:18765` only. Upstream host **compiled in**: `https://chatgpt.com/backend-api/codex/responses` (HTTPS SSE; no WebSocket). Thread-per-connection, `Connection: close`, Content-Length bodies only, body cap.
 
-Model handling: `gpt-luna|sol|astra` family aliases and versioned slugs (plus deprecated terra aliases) resolve to the highest served version of each current family; a family missing from the newest generation resolves to sol. The proxy refreshes the backend model catalog at startup and every six hours, with a fallback table if fetching fails. Optional `@effort` suffix (`gpt-astra@ultra`) → `reasoning.effort`; request `output_config.effort` honoured if present; else family default (luna low, sol high, astra xhigh). Non-GPT model names (headless child's background/haiku calls) → luna, logged.
+Model handling: `gpt-luna|terra|sol|astra` family aliases and versioned slugs resolve to the highest served version of each current family; a family missing from the newest generation resolves to sol. The proxy refreshes the backend model catalog at startup and every six hours, with a fallback table if fetching fails. Optional `@effort` suffix (`gpt-astra@ultra`) → `reasoning.effort`; request `output_config.effort` honoured if present; else family default (luna low, terra medium, sol high, astra xhigh). Non-GPT model names (headless child's background/haiku calls) → luna, logged.
 
 Request translation (Anthropic → Responses):
 - `system` → `instructions` (spike 0b fallback: `developer` input message)
@@ -68,13 +68,13 @@ Build: `-std=c17 -Wall -Wextra -Werror -O2 -D_FORTIFY_SOURCE=3 -fstack-protector
 
 ### 3. Claude Code side (main session, first-party)
 - `skills/delegating-to-gpt/SKILL.md` — for whichever Claude model is directing: **obey the policy in §5 first**; GPT agents add to, never replace, native Claude subagents. Primary dispatch path = Agent with `subagent_type: "claudex:gpt-<tier>"`, background by default; include goal, paths, constraints, done-criteria and verification command. The Agent tool delivers the task notification. **The director re-reads diffs and re-runs tests itself**; errors → report, no retry loop. Bash `claudex-worker` remains for Mods-off sessions.
-- `agents/relay-{luna,sol,astra}.md` — Sonnet couriers (`tools: Bash`) for Workflow scripts and Mods-off sessions: pass the brief verbatim to `claudex-worker`, don't do the task, return the report + session id + `git diff --stat`.
-- `agents/relay-adversary.md` — courier for the read-only adversarial role (below). There is no terra agent; deprecated terra requests resolve to sol.
+- `agents/relay-{luna,terra,sol,astra}.md` — Sonnet couriers (`tools: Bash`) for Workflow scripts and Mods-off sessions: pass the brief verbatim to `claudex-worker`, don't do the task, return the report + session id + `git diff --stat`.
+- `agents/relay-adversary.md` — courier for the read-only adversarial role (below).
 - `~/.claude/settings.json`: one `permissions.allow` rule `Bash(claudex-worker:*)` + matching `autoMode.allow` line (via update-config skill). Only settings change.
 
 Packaged as a **Claude Code plugin** (`claudex`, installed from the repo as a local marketplace) so the whole layer is one `/plugin` enable/disable. Works identically whichever Claude model is the director.
 
-- **Claude Mod:** `plugin/hooks/` registers native `claudex:gpt-luna|sol|astra` agent types
+- **Claude Mod:** `plugin/hooks/` registers native `claudex:gpt-luna|terra|sol|astra` agent types
   with GPT model aliases and `read` or `edit` tools. It checks spawn admission through the
   worker, serves GPT steps through `claudex-worker step`, and checks file paths lexically for
   Read/Write/Edit/Grep/Glob. Bash follows the session's permissions and sandbox alone. Rows
@@ -101,8 +101,8 @@ Config `~/.config/claudex/config` (KEY=VALUE), every key overridable per session
 | `CLAUDEX` | `on` / `off` | master switch; `off` → hook prints nothing, skills refuse, Claude-only |
 | `CLAUDEX_DELEGATION` | `on-request` / `suggest` / `auto` / `off` | GPT as subagents: only when the user asks / director may propose and wait / director may dispatch on its own within limits |
 | `CLAUDEX_ADVERSARY` | `on-request` / `plans` / `plans+diffs` / `off` | when the adversarial pass runs unprompted |
-| `CLAUDEX_TIERS` | `luna,sol,astra` | tiers allowed at all; terra accepted as sol |
-| `CLAUDEX_DEFAULT_WORKER` | `sol` | tier when the user says "use GPT" without naming one; terra accepted as sol |
+| `CLAUDEX_TIERS` | `luna,terra,sol,astra` | tiers allowed at all |
+| `CLAUDEX_DEFAULT_WORKER` | `sol` | tier when the user says "use GPT" without naming one |
 | `CLAUDEX_ADVERSARY_MODEL` | `gpt-astra@xhigh` | family alias or versioned slug + effort, up to `@ultra` |
 | `CLAUDEX_MAX_PARALLEL` | `4` | headless jobs queue on slots; native agent admission denies at the limit |
 | `CLAUDEX_WORKER_MODE` | `edit` / `read` | worker and native agent tools; headless `yolo` is per-call only, never for native agents |
@@ -116,7 +116,7 @@ Slash commands: `/claudex:delegate <tier> <task>`, `/claudex:adversary …`, `/c
 src/   main.c http_server.c sse.c auth.c models.c translate_req.c schema.c
        translate_stream.c errors.c sandbox.c log.c buf.c  (+ headers)
 tests/ unit/*.c  fuzz/{sse,http,translate_req,schema}_fuzz.c  fake_upstream/  fixtures/ (sanitized)
-plugin/  .claude-plugin/plugin.json   agents/relay-{luna,sol,astra,adversary}.md
+plugin/  .claude-plugin/plugin.json   agents/relay-{luna,terra,sol,astra,adversary}.md
          skills/{delegating-to-gpt,delegate,adversary,config,status}/SKILL.md
          hooks/hooks.json (SessionStart → `claudex-worker policy-line`)   bin/claudex-worker
 .claude-plugin/marketplace.json (repo doubles as a local marketplace)

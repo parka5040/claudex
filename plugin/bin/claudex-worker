@@ -33,7 +33,7 @@ declare -A CFG=(
     [CLAUDEX]=on
     [CLAUDEX_DELEGATION]=on-request
     [CLAUDEX_ADVERSARY]=on-request
-    [CLAUDEX_TIERS]=luna,sol,astra
+    [CLAUDEX_TIERS]=luna,terra,sol,astra
     [CLAUDEX_DEFAULT_WORKER]=sol
     [CLAUDEX_ADVERSARY_MODEL]=gpt-astra@xhigh
     [CLAUDEX_MAX_PARALLEL]=4
@@ -48,7 +48,7 @@ declare -A PATTERN=(
     [CLAUDEX_ADVERSARY]='^(on-request|plans|plans\+diffs|off)$'
     [CLAUDEX_TIERS]='^(luna|terra|sol|astra)(,(luna|terra|sol|astra))*$'
     [CLAUDEX_DEFAULT_WORKER]='^(luna|terra|sol|astra)$'
-    [CLAUDEX_ADVERSARY_MODEL]='^gpt-(([0-9]+(\.[0-9]+)?-)?(luna|sol|astra|terra))(@(low|medium|high|xhigh|max|ultra))?$'
+    [CLAUDEX_ADVERSARY_MODEL]='^gpt-(([0-9]+(\.[0-9]+)?-)?(luna|terra|sol|astra))(@(low|medium|high|xhigh|max|ultra))?$'
     [CLAUDEX_MAX_PARALLEL]='^([1-9]|1[0-6])$'
     [CLAUDEX_WORKER_MODE]='^(edit|read)$'   # yolo is per-call only, never a default
 )
@@ -92,48 +92,38 @@ cmd_set() {
     echo "$1=$2"
 }
 
-terra_deprecated() {
-    [[ ",${CFG[CLAUDEX_TIERS]}," == *,terra,* || "${CFG[CLAUDEX_DEFAULT_WORKER]}" == terra ||
-       "${CFG[CLAUDEX_ADVERSARY_MODEL]%@*}" == *-terra ]]
-}
-
 cmd_policy_line() {
     [[ "${CFG[CLAUDEX]}" == on ]] || return 0
-    local warning="" mapping="" health=''
-    terra_deprecated && warning=" terra is deprecated (served by sol)."
+    local mapping="" health=''
     health=$(proxy_health) || health=''
     if [[ "$health" == *'"service":"claudex-proxy"'* ]]; then
         mapping=$(jq -r 'if (.models | type) == "object" then
-            " models: luna=\(.models.luna) sol=\(.models.sol) astra=\(.models.astra) (\(.models.source))."
+            " models: luna=\(.models.luna) sol=\(.models.sol) astra=\(.models.astra) terra=\(.models.terra) (\(.models.source))."
             else empty end' <<< "$health" 2>/dev/null) || mapping=''
     fi
     echo "claudex (GPT layer) is ON: delegation=${CFG[CLAUDEX_DELEGATION]} adversary=${CFG[CLAUDEX_ADVERSARY]}" \
          "tiers=${CFG[CLAUDEX_TIERS]} default_worker=${CFG[CLAUDEX_DEFAULT_WORKER]}" \
          "adversary_model=${CFG[CLAUDEX_ADVERSARY_MODEL]} max_parallel=${CFG[CLAUDEX_MAX_PARALLEL]}" \
          "worker_mode=${CFG[CLAUDEX_WORKER_MODE]}." \
-         "What the user says in this conversation overrides these settings. Use GPT only as the claudex:delegating-to-gpt skill describes.$mapping$warning"
+         "What the user says in this conversation overrides these settings. Use GPT only as the claudex:delegating-to-gpt skill describes.$mapping"
 }
 
 # ---- tiers ------------------------------------------------------------------
 
 tier_slug() {
     case "$1" in
-        luna) echo gpt-luna ;; sol) echo gpt-sol ;; terra) echo gpt-terra ;;
+        luna) echo gpt-luna ;; terra) echo gpt-terra ;; sol) echo gpt-sol ;;
         astra) echo gpt-astra ;;
         *) return 1 ;;
     esac
 }
-tier_default_effort() { case "$1" in luna) echo low ;; terra|sol) echo high ;; astra) echo xhigh ;; esac; }
+tier_default_effort() { case "$1" in luna) echo low ;; terra) echo medium ;; sol) echo high ;; astra) echo xhigh ;; esac; }
 slug_tier() {
     case "$1" in
-        *-luna) echo luna ;; *-sol|*-terra) echo sol ;; *-astra) echo astra ;;
+        *-luna) echo luna ;; *-terra) echo terra ;; *-sol) echo sol ;; *-astra) echo astra ;;
     esac
 }
-tier_enabled() {
-    local gate=$1 tiers=",${CFG[CLAUDEX_TIERS]},"
-    [[ "$gate" != terra ]] || gate=sol
-    [[ "$tiers" == *",$gate,"* || ( "$gate" == sol && "$tiers" == *,terra,* ) ]]
-}
+tier_enabled() { [[ ",${CFG[CLAUDEX_TIERS]}," == *",$1,"* ]]; }
 
 # ---- proxy ------------------------------------------------------------------
 
@@ -266,16 +256,14 @@ cmd_status() {
         up=true
         models=$(jq -c '.models // null' <<< "$health") || models=null
     fi
-    terra_deprecated && deprecations='["terra is deprecated (served by sol)"]'
     if [[ "$json" != --json ]]; then
         cmd_config
         if [[ "$up" == true ]]; then
             echo "proxy=up port=$PORT ours=$(proxy_is_ours && echo yes || echo NO)"
             if [[ "$models" != null ]]; then
-                jq -r '"models: luna=\(.luna) sol=\(.sol) astra=\(.astra) (\(.source))"' <<< "$models"
+                jq -r '"models: luna=\(.luna) sol=\(.sol) astra=\(.astra) terra=\(.terra) (\(.source))"' <<< "$models"
             fi
         else echo "proxy=down port=$PORT (starts on demand)"; fi
-        [[ "$deprecations" == '[]' ]] || echo "terra is deprecated (served by sol)"
         exp=$(token_exp)
         if [[ -n "$exp" ]]; then echo "codex_token_hours_left=$(( (exp - $(date +%s)) / 3600 ))"; else echo "codex_token=unreadable (run \`codex login\`)"; fi
         return
@@ -337,7 +325,6 @@ check_worker_tier() {
     else
         WORK_SLUG=$(tier_slug "$WORK_TIER") || die 2 "unknown tier '$WORK_TIER' (use luna, terra, sol, astra or adversary)"
         WORK_GATE=$WORK_TIER
-        [[ "$WORK_GATE" != terra ]] || WORK_GATE=sol
     fi
     tier_enabled "$WORK_GATE" || die 4 "tier '$WORK_GATE' is not enabled (CLAUDEX_TIERS=${CFG[CLAUDEX_TIERS]})"
 }
@@ -361,13 +348,9 @@ preflight() {
     done
     [[ -z "$WORK_RESUME" || "$WORK_RESUME" =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]] || die 2 "invalid session id"
     check_worker_tier "$WORK_TIER"
-    if [[ -z "$WORK_EFFORT" && "$WORK_SLUG" == gpt-terra ]]; then
-        WORK_MODEL=$WORK_SLUG # the proxy chooses sol or a current terra's default effort
-    else
-        [[ -n "$WORK_EFFORT" ]] || WORK_EFFORT=$(tier_default_effort "$WORK_GATE")
-        [[ "$WORK_EFFORT" =~ ^(low|medium|high|xhigh|max|ultra)$ ]] || die 2 "invalid effort '$WORK_EFFORT'"
-        WORK_MODEL="$WORK_SLUG@$WORK_EFFORT"
-    fi
+    [[ -n "$WORK_EFFORT" ]] || WORK_EFFORT=$(tier_default_effort "$WORK_GATE")
+    [[ "$WORK_EFFORT" =~ ^(low|medium|high|xhigh|max|ultra)$ ]] || die 2 "invalid effort '$WORK_EFFORT'"
+    WORK_MODEL="$WORK_SLUG@$WORK_EFFORT"
     [[ -n "$WORK_MODE" ]] || WORK_MODE="${CFG[CLAUDEX_WORKER_MODE]}"
     [[ "$WORK_MAX_TURNS" =~ ^[0-9]+$ ]] || die 2 "invalid --max-turns"
     [[ -d "$WORK_CWD" ]] || die 2 "no such directory: $WORK_CWD"

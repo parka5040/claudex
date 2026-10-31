@@ -48,7 +48,7 @@ text_body() { # text_body <model> <effort>
 
 case "${1:-tiers}" in
 tiers)
-    for m in gpt-6-luna gpt-5.6-terra gpt-6-sol gpt-6-astra; do
+    for m in gpt-6-luna gpt-6.1-terra gpt-6-sol gpt-6-astra; do
         text_body "$m" low > "$OUT/$m.req.json"
         probe "$m" "$OUT/$m.req.json"
     done

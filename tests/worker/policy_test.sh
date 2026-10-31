@@ -49,7 +49,7 @@ out=$(w "$W" config)
 contains "default master switch" "$out" "CLAUDEX=on"
 contains "default delegation" "$out" "CLAUDEX_DELEGATION=on-request"
 contains "default adversary" "$out" "CLAUDEX_ADVERSARY=on-request"
-contains "default tiers" "$out" "CLAUDEX_TIERS=luna,sol,astra"
+contains "default tiers" "$out" "CLAUDEX_TIERS=luna,terra,sol,astra"
 contains "default worker" "$out" "CLAUDEX_DEFAULT_WORKER=sol"
 contains "default adversary model" "$out" "CLAUDEX_ADVERSARY_MODEL=gpt-astra@xhigh"
 contains "default parallel" "$out" "CLAUDEX_MAX_PARALLEL=4"
@@ -79,8 +79,8 @@ out=$(w CLAUDEX_TIERS=luna,pluto "$W" config 2>&1);  check "bad tier" "$?" "2"
 out=$(w CLAUDEX_MAX_PARALLEL=0 "$W" config 2>&1);    check "bad parallel" "$?" "2"
 out=$(w CLAUDEX_WORKER_MODE=yolo "$W" config 2>&1);  check "yolo can't be a default" "$?" "2"
 out=$(w CLAUDEX_ADVERSARY_MODEL='gpt-6-astra@ultra; rm -rf /' "$W" config 2>&1); check "bad adversary model" "$?" "2"
-out=$(w CLAUDEX_DEFAULT_WORKER=terra "$W" config); check "legacy default worker accepted" "$?" "0"
-for model in gpt-luna gpt-sol gpt-astra gpt-terra gpt-7.2-sol@xhigh gpt-5.6-terra; do
+out=$(w CLAUDEX_DEFAULT_WORKER=terra "$W" config); check "terra default worker accepted" "$?" "0"
+for model in gpt-luna gpt-terra gpt-sol gpt-astra gpt-7.2-sol@xhigh gpt-6.1-terra gpt-5.6-terra; do
     w CLAUDEX_ADVERSARY_MODEL="$model" "$W" config >/dev/null 2>&1
     check "valid adversary $model" "$?" "0"
 done
@@ -106,14 +106,13 @@ contains "mentions policy" "$out" "delegation=on-request"
 contains "mentions adversary" "$out" "adversary=on-request"
 contains "one line" "$(echo "$out" | wc -l | tr -d ' ')" "1"
 out=$(w CLAUDEX=off "$W" policy-line); check "silent when off" "$out" ""
-out=$(w CLAUDEX_TIERS=luna,terra "$W" policy-line)
-contains "policy mentions terra deprecation" "$out" "terra is deprecated (served by sol)"
 out=$(w CLAUDEX_TIERS=luna,terra CLAUDEX_DEFAULT_WORKER=terra CLAUDEX_ADVERSARY_MODEL=gpt-terra "$W" policy-line)
-check "deprecation only once" "$(printf '%s' "$out" | python3 -c 'import sys; print(sys.stdin.read().count("terra is deprecated (served by sol)"))')" "1"
+contains "policy line lists terra" "$out" "tiers=luna,terra default_worker=terra"
+absent "policy line has no terra deprecation" "$out" "deprecated"
 out=$(w CLAUDEX_TIERS=luna,terra "$W" status)
-contains "status mentions terra deprecation" "$out" "terra is deprecated (served by sol)"
+absent "status has no terra deprecation" "$out" "deprecated"
 out=$(w CLAUDEX_TIERS=luna,terra "$W" status --json)
-check "status JSON deprecations" "$(jq -r '.deprecations[0]' <<<"$out")" "terra is deprecated (served by sol)"
+check "status JSON deprecations empty" "$(jq -c '.deprecations' <<<"$out")" "[]"
 check "status JSON models null without proxy" "$(jq -r '.models' <<<"$out")" "null"
 
 echo "  master switch and tier gating are enforced by the worker itself"
@@ -123,6 +122,14 @@ check "off -> claude never ran" "$([ -e "$TMP/stub.log" ] && echo ran || echo no
 out=$(echo "task" | w CLAUDEX_TIERS=luna,terra "$W" run astra 2>&1); check "tier blocked -> exit 4" "$?" "4"
 contains "tier blocked message" "$out" "astra"
 out=$(echo "task" | w CLAUDEX_TIERS=luna,terra "$W" run adversary 2>&1); check "adversary respects tier gate" "$?" "4"
+out=$(echo "task" | w CLAUDEX_TIERS=luna,terra "$W" run sol 2>&1); check "terra does not enable sol" "$?" "4"
+out=$(echo "task" | w CLAUDEX_TIERS=luna,sol "$W" run terra 2>&1); check "sol does not enable terra" "$?" "4"
+contains "terra gate message" "$out" "tier 'terra' is not enabled"
+out=$(echo "task" | w CLAUDEX_TIERS=luna,sol CLAUDEX_ADVERSARY_MODEL=gpt-terra "$W" run adversary 2>&1)
+check "terra adversary gated by terra" "$?" "4"
+out=$(w CLAUDEX_TIERS=luna,sol "$W" admit terra --running 0 2>&1); check "admit gates terra" "$?" "4"
+out=$(echo '{}' | w CLAUDEX_TIERS=luna,sol "$W" step terra 2>&1); check "step gates terra" "$?" "4"
+out=$(w CLAUDEX_TIERS=luna,sol "$W" model terra 2>&1); check "model gates terra" "$?" "4"
 out=$(echo "task" | w "$W" run pluto 2>&1); check "unknown tier -> exit 2" "$?" "2"
 out=$(w "$W" run sol </dev/null 2>&1); check "empty brief -> exit 2" "$?" "2"
 
@@ -177,16 +184,15 @@ echo "attack this" | w CLAUDEX_ADVERSARY_MODEL=gpt-5.6-sol "$W" run adversary >/
 contains "superseded adversary slug still runs" "$(cat "$TMP/stub.log")" "[gpt-5.6-sol@high]"
 reset
 echo "attack this" | w CLAUDEX_ADVERSARY_MODEL=gpt-terra "$W" run adversary >/dev/null
-contains "deprecated adversary alias reaches proxy" "$(cat "$TMP/stub.log")" "[--model] [gpt-terra]"
+contains "terra adversary alias reaches proxy" "$(cat "$TMP/stub.log")" "[--model] [gpt-terra@medium]"
 echo "x" | w CLAUDEX_TIERS=luna CLAUDEX_ADVERSARY_MODEL=gpt-5.6-sol "$W" run adversary >/dev/null 2>&1
 check "superseded slug is gated as its tier" "$?" "4"
 reset
 echo "task" | w CLAUDEX_TIERS=luna,terra "$W" run terra >/dev/null
-contains "terra tier reaches proxy as terra" "$(cat "$TMP/stub.log")" "[--model] [gpt-terra]"
+contains "terra tier reaches proxy as terra" "$(cat "$TMP/stub.log")" "[--model] [gpt-terra@medium]"
 reset
 echo "task" | w CLAUDEX_TIERS=luna,terra "$W" run terra --effort xhigh >/dev/null
 contains "terra explicit effort is forwarded" "$(cat "$TMP/stub.log")" "[--model] [gpt-terra@xhigh]"
-check "terra and sol deduplicated" "$(echo task | w CLAUDEX_TIERS=luna,terra "$W" run sol >/dev/null 2>&1; echo $?)" "0"
 reset
 echo "x" | w "$W" run adversary --mode edit >/dev/null 2>&1; check "adversary refuses edit mode" "$?" "2"
 reset
@@ -216,7 +222,7 @@ check "start returns a job id" "$([[ "$job" =~ ^[a-z0-9-]+$ ]] && echo ok || ech
 out=$(w "$W" wait "$job" --timeout 0 2>&1); check "wait times out while running -> exit 5" "$?" "5"
 out=$(w "$W" wait "$job" --timeout 10);      check "wait succeeds" "$?" "0"
 contains "wait prints report" "$out" "stub report"
-contains "start terra sends the terra alias" "$(cat "$TMP/stub.log")" "[--model] [gpt-terra]"
+contains "start terra sends the terra alias" "$(cat "$TMP/stub.log")" "[--model] [gpt-terra@medium]"
 contains "result replays report" "$(w "$W" result "$job")" "stub report"
 w "$W" result 'no/such/../job' >/dev/null 2>&1; check "result validates job id" "$?" "2"
 

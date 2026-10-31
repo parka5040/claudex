@@ -1,6 +1,6 @@
 # claudex
 
-An opt-in GPT layer for Claude Code. GPT families (luna / sol / astra) run as native
+An opt-in GPT layer for Claude Code. GPT families (luna / terra / sol / astra) run as native
 **subagents**, headless workers and an **adversarial reviewer** inside Claude Code's harness,
 billed to the ChatGPT subscription the Codex CLI is logged into. Claude-native behaviour is
 not touched, and nothing GPT happens unless you ask for it.
@@ -20,7 +20,7 @@ claudex-proxy (C, sandboxed)              Anthropic Messages  ⇄  OpenAI Respon
 https://chatgpt.com/backend-api/codex/responses
 ```
 
-Native `claudex:gpt-luna|sol|astra` agents use the Agent tool in the main session. The mod
+Native `claudex:gpt-luna|terra|sol|astra` agents use the Agent tool in the main session. The mod
 serves their model steps through `claudex-worker step` and the same proxy; they are not
 headless `claude -p` children. `claudex:relay-*` couriers still use the headless path above
 for Workflow scripts and sessions where Claude Mods are off.
@@ -61,30 +61,33 @@ like `response.failed`. For `response.incomplete`, `max_output_tokens` maps to `
 missing reasons to `api_error` (non-streaming: 502). Headless workers retry overloads;
 native agent steps return the error without a step-level retry.
 
-Model families: `luna`, `sol`, `astra`. Use `gpt-luna`, `gpt-sol`, `gpt-astra` (or a
-versioned slug such as `gpt-6.1-sol`) with optional `@low|medium|high|xhigh|max|ultra`.
-The proxy resolves even a versioned slug to its family's current model. It fetches the
-backend model catalog at startup and every six hours; only listed, API-supported GPT family
-slugs count. A family is current when served in the newest generation. Otherwise it uses
-sol. Until a successful catalog fetch (or after a failed one), fallback models are
-`gpt-6-luna`, `gpt-6.1-sol`, `gpt-6-astra`. As of 2026-10-03 those are also the served
-models for the three families. A rejected model triggers a refresh; retrying a failed
-request may reach a replacement, but that request still fails. `/v1/models` lists the
+Model families: `luna`, `terra`, `sol`, `astra`. Use `gpt-luna`, `gpt-terra`, `gpt-sol`,
+`gpt-astra` (or a versioned slug such as `gpt-6.1-terra`) with optional
+`@low|medium|high|xhigh|max|ultra`. The proxy resolves even a versioned slug to its family's
+current model. It fetches the backend model catalog at startup and every six hours; only listed,
+API-supported GPT family slugs count. A family is current when served in the newest generation.
+Otherwise it uses sol. Until a successful catalog fetch (or after a failed one), fallback models
+are `gpt-6-luna`, `gpt-6.1-terra`, `gpt-6.1-sol`, `gpt-6-astra`. As of 2026-10-29 those are
+also the served models for the four families. A rejected model triggers a refresh; retrying a
+failed request may reach a replacement, but that request still fails. `/v1/models` lists the
 current families; `/healthz` reports the resolution and whether it came from the backend
 or fallback.
 
-`terra`, `gpt-terra` and versioned terra names remain accepted for old settings and
-resolve to sol; terra is deprecated and has no agent or courier. Defaults: luna low
-(`ultra` clamps to `max`), sol high, astra xhigh. A headless worker's internal background
-requests (which name Claude models) go to luna at low effort.
+`gpt-5.6-terra` is retired: every terra name, `gpt-5.6-terra` included, resolves to the current
+terra (`gpt-6.1-terra`) or, when no current terra is served, to sol. claudex never sends a
+request to a 5.6 terra. Defaults: luna low (`ultra` clamps to `max`), terra medium, sol high,
+astra xhigh. A headless worker's internal background requests (which name Claude models) go to
+luna at low effort.
 
 ## Control
 
-Roles: sol writes all code (implementation, tests, refactors, mechanical edits, debugging) and
-is the default worker. Astra reviews: the adversary (`gpt-astra@xhigh` by default, through
-`mcp__claudex__review`) handles adversarial and architectural reviews, and `claudex:gpt-astra`
-gives peer-level second opinions; neither writes code. Luna handles extraction, classification
-and summaries, and serves headless workers' background requests.
+Roles: terra writes straightforward, well-specified code (mechanical edits, small fixes, tests
+from an exact spec). Sol writes complex multi-file implementation, refactors and debugging, takes
+any code task that is not clearly straightforward, and is the default worker. Astra reviews: the
+adversary (`gpt-astra@xhigh` by default, through `mcp__claudex__review`) handles adversarial and
+architectural reviews, and `claudex:gpt-astra` gives peer-level second opinions; neither writes
+code. Luna handles extraction, classification and summaries, and serves headless workers'
+background requests.
 
 Precedence: what you say in the conversation > slash command > environment > config file > defaults.
 
@@ -93,8 +96,8 @@ Precedence: what you say in the conversation > slash command > environment > con
 | `CLAUDEX` | `on`, `off` — master switch |
 | `CLAUDEX_DELEGATION` | `on-request`, `suggest`, `auto`, `off` |
 | `CLAUDEX_ADVERSARY` | `on-request`, `plans`, `plans+diffs`, `off` |
-| `CLAUDEX_TIERS` | `luna,sol,astra` (`terra` accepted as sol) |
-| `CLAUDEX_DEFAULT_WORKER` | `sol` (`terra` accepted as sol) |
+| `CLAUDEX_TIERS` | `luna,terra,sol,astra` |
+| `CLAUDEX_DEFAULT_WORKER` | `sol` |
 | `CLAUDEX_ADVERSARY_MODEL` | `gpt-astra@xhigh` (family aliases or versioned slugs accepted) |
 | `CLAUDEX_MAX_PARALLEL` | `4` (1–16; native agent spawns count running native agents plus headless jobs and are denied at the limit; headless workers (Bash, relays, the adversary) count only headless jobs and queue, so they can exceed the limit while native agents run) |
 | `CLAUDEX_WORKER_MODE` | `edit`, `read` (headless `yolo` is per call only; not for agents) |
@@ -102,7 +105,15 @@ Precedence: what you say in the conversation > slash command > environment > con
 `claudex-worker` enforces the master switch, tier list and parallel limit (including native
 agent admission) itself, so they hold even if a model ignores its instructions. One session
 only: `CLAUDEX=off claude`. `claudex-worker status` shows the current proxy model resolution
-when available, and warns once if any setting uses terra.
+when available.
+
+**Upgrading from 0.4:** terra is its own tier again, and terra and sol no longer stand in for
+each other. A tier list that names terra but not sol (for example `CLAUDEX_TIERS=luna,terra,astra`)
+used to enable sol and now enables only terra. A tier list you set without terra (for example
+the old default `luna,sol,astra`) used to run `CLAUDEX_DEFAULT_WORKER=terra`,
+`CLAUDEX_ADVERSARY_MODEL=gpt-terra…` and `claudex-worker run terra` on sol; those are now
+refused until you add terra to the list, or name sol instead to keep the old behaviour. If you
+never set `CLAUDEX_TIERS`, the new default includes terra.
 
 ```
 claudex-worker run TIER [--cwd DIR] [--effort E] [--mode read|edit|yolo] < brief
@@ -114,8 +125,8 @@ claudex-worker config | set KEY VALUE | status | stop-proxy
 ## Claude Mods
 
 Claude Code 2.1.302 or later can load the claudex mod. With `CLAUDEX=on` it registers
-`claudex:gpt-luna`, `claudex:gpt-sol` and `claudex:gpt-astra` as native Agent types for
-enabled tiers. Dispatch them with the Agent tool, normally in the background: their tool
+`claudex:gpt-luna`, `claudex:gpt-terra`, `claudex:gpt-sol` and `claudex:gpt-astra` as native
+Agent types for enabled tiers. Dispatch them with the Agent tool, normally in the background: their tool
 rows appear live in the agent panel and the Agent tool notifies the parent when they finish.
 GPT agents finish by calling SubagentHandback like native agents, and each is capped at 200 turns.
 GPT text appears when each step completes, not live as its text is streamed. Agent rows show
