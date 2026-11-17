@@ -146,3 +146,4 @@ Director observations before the 0.4.0 changes:
 | claudex status line while a GPT agent runs | **`claudex: idle`** | n/a |
 
 After Tasks 1–3, the director verified on 2.1.302: `/tasks` showed `running · gpt-6-luna (low)` beside `running · Opus 5.5 (1M context)`, and the status line showed `claudex: 1 running` while the GPT agent ran.
++

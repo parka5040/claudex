@@ -10,7 +10,7 @@ Decisions (user, 2026-09-18):
 |---|---|
 | Architecture | **Sidecar workers.** Main Fable session is plain first-party `claude` with **no proxy** → Remote Control/phone, push notifications, auto mode, plan mode, skip-permissions, tool search, 1M, fast mode all untouched. GPT tiers run as child headless Claude Code processes (`claude -p --model <gpt slug>`) pointed at a local GPT-only proxy |
 | Proxy | **Our own, written in C.** No third-party code touches a credential. GPT-only: no Claude passthrough, and the Claude credential never reaches it (child gets a dummy `ANTHROPIC_AUTH_TOKEN`, which per docs replaces the subscription login for that process) |
-| Tiers | `luna`, `terra`, `sol`, `astra` via family aliases resolved by the proxy's current catalog; the fallback table is `gpt-6-luna`, `gpt-6.1-terra`, `gpt-6.1-sol`, `gpt-6-astra`. `gpt-5.6-terra` is retired and never requested. |
+| Tiers | `luna`, `terra`, `sol`, `astra` via family aliases resolved by the proxy's current catalog; the fallback table is `gpt-6-luna`, `gpt-6.1-terra`, `gpt-6.2-sol`, `gpt-6.2-astra`. `gpt-5.6-terra` is retired and never requested. |
 | Client identity | Honest: identifies as Claude Code (third-party harness). Never `codex_cli_rs` or `x-openai-internal-*`. Backend refuses → STOP and report |
 | Claude-native | Must remain fully intact and is the default. GPT is opt-in, in two roles (subagent, adversary), **fully user-controllable by prompt, slash command, config file, or CLI/env** |
 

@@ -31,7 +31,7 @@ static long long   N(tr_t *t, const char *ptr) { yyjson_val *v = P(t, ptr); retu
 TEST(minimal_request_gets_fixed_upstream_fields) {
     tr_t t = tr(REQ("\"system\":\"Be brief.\"," USER_HI));
     CHECK_INT(t.rc, 0);
-    CHECK_STR(S(&t, "/model"), "gpt-6.1-sol");
+    CHECK_STR(S(&t, "/model"), "gpt-6.2-sol");
     CHECK(P(&t, "/instructions") == NULL);
     CHECK_STR(S(&t, "/input/0/type"), "message");
     CHECK_STR(S(&t, "/input/0/role"), "developer");
@@ -69,7 +69,7 @@ TEST(non_streaming_client_is_recorded_but_upstream_still_streams) {
 
 TEST(model_suffix_and_body_effort_resolve_through_models) {
     tr_t t = tr("{\"model\":\"gpt-6-astra@ultra[1m]\"," USER_HI "}");
-    CHECK_STR(S(&t, "/model"), "gpt-6-astra");
+    CHECK_STR(S(&t, "/model"), "gpt-6.2-astra");
     CHECK_STR(S(&t, "/reasoning/effort"), "ultra");
     CHECK_STR(t.x.client_model, "gpt-6-astra@ultra[1m]");
     tr_free(&t);
@@ -78,16 +78,16 @@ TEST(model_suffix_and_body_effort_resolve_through_models) {
     CHECK_STR(S(&t, "/reasoning/effort"), "max");
     tr_free(&t);
     t = tr("{\"model\":\"gpt-sol\"," USER_HI "}");
-    CHECK_STR(S(&t, "/model"), "gpt-6.1-sol");
+    CHECK_STR(S(&t, "/model"), "gpt-6.2-sol");
     tr_free(&t);
 }
 
 TEST(unknown_gpt_model_is_404_and_bad_effort_is_400) {
     tr_t t = tr("{\"model\":\"gpt-5.6\"," USER_HI "}");
     CHECK_INT(t.rc, -404);
-    CHECK(strstr(t.err, "gpt-6.1-sol") != NULL);
+    CHECK(strstr(t.err, "gpt-6.2-sol") != NULL);
     CHECK(strstr(t.err, "gpt-6-luna") != NULL);
-    CHECK(strstr(t.err, "gpt-6-astra") != NULL);
+    CHECK(strstr(t.err, "gpt-6.2-astra") != NULL);
     CHECK(strstr(t.err, "gpt-6.1-terra") != NULL);
     CHECK(strstr(t.err, "gpt-5.6-terra") == NULL);
     tr_free(&t);

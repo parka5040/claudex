@@ -14,7 +14,7 @@
 enum { LUNA, SOL, ASTRA, TERRA, FAMILIES };
 static const char *const NAMES[] = { "luna", "sol", "astra", "terra" };
 static const char *const DEFAULTS[] = { "low", "high", "xhigh", "medium" };
-static const char *const FALLBACK[] = { "gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-terra" };
+static const char *const FALLBACK[] = { "gpt-6-luna", "gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-terra" };
 static const char *const EFFORTS[] = { "low", "medium", "high", "xhigh", "max", "ultra" };
 
 /* Accepted as names, never resolved to; retirement outranks the generation rule. */

@@ -80,7 +80,7 @@ check "accept" "$(jq -r '.headers.accept' <<<"$req")" "text/event-stream"
 absent "no internal headers" "$(jq -r '.headers | keys | join(" ")' <<<"$req")" "x-openai-internal"
 absent "no codex_cli_rs" "$req" "codex_cli_rs"
 absent "client api key not forwarded" "$req" "claudex-local"
-check "upstream model" "$(jq -r '.body | fromjson | .model' <<<"$req")" "gpt-6.1-sol"
+check "upstream model" "$(jq -r '.body | fromjson | .model' <<<"$req")" "gpt-6.2-sol"
 check "no upstream instructions key" "$(jq -r '.body | fromjson | has("instructions")' <<<"$req")" "false"
 check "upstream developer message" "$(jq -c '.body | fromjson | .input[0]' <<<"$req")" \
     '{"type":"message","role":"developer","content":[{"type":"input_text","text":"Be brief."}]}'
@@ -149,7 +149,7 @@ check "GET unknown path" "$(curl -sS -m 2 -o /dev/null -w '%{http_code}' "$PX/")
 out=$(post /v1/messages/count_tokens "$MSG_NOSTREAM");              check "count_tokens status" "$(status)" "200"
 check "count_tokens positive" "$(jq -r '.input_tokens > 0' <<<"$out")" "true"
 check "models list" "$(curl -sS -m 2 "$PX/v1/models" | jq -r '.data | map(.id) | join(",")')" \
-    "gpt-6-luna,gpt-6.1-sol,gpt-6-astra,gpt-6.1-terra"
+    "gpt-6-luna,gpt-6.2-sol,gpt-6.2-astra,gpt-6.1-terra"
 
 echo "  concurrent requests"
 set_mode slow
@@ -164,7 +164,7 @@ check "all 6 parallel streams completed" "$n" "6"
 echo "  secrets never reach the log; proxy survived"
 absent "token absent from proxy log" "$(cat "$TMP/proxy.log")" "$FAKE_TOKEN"
 absent "no sanitizer reports" "$(cat "$TMP/proxy.log")" "Sanitizer"
-contains "log has metadata lines" "$(cat "$TMP/proxy.log")" "model=gpt-6.1-sol"
+contains "log has metadata lines" "$(cat "$TMP/proxy.log")" "model=gpt-6.2-sol"
 contains "log surfaces rate-limit header" "$(cat "$TMP/proxy.log")" "used_pct=42"
 if kill -0 "$PX_PID" 2>/dev/null; then ok; else bad "proxy died during the run"; fi
 

@@ -15,6 +15,7 @@ static int load_file(const char *path) {
 }
 static int load_fixture(void) { return load_file("tests/fixtures/models-2026-10-03.json"); }
 static int load_today(void) { return load_file("tests/fixtures/models-2026-10-29.json"); }
+static int load_nov17(void) { return load_file("tests/fixtures/models-2026-11-17.json"); }
 static void resolves(const char *name, const char *slug, const char *effort) {
     model_sel_t m;
     CHECK_INT(model_resolve(name, NULL, &m), MODEL_OK);
@@ -30,23 +31,25 @@ TEST(fallback_and_aliases) {
     resolves("gpt-luna", "gpt-6-luna", "low");
     resolves("gpt-5.6-luna", "gpt-6-luna", "low");
     resolves("gpt-6-luna", "gpt-6-luna", "low");
-    resolves("gpt-sol", "gpt-6.1-sol", "high");
-    resolves("gpt-5.6-sol", "gpt-6.1-sol", "high");
-    resolves("gpt-6-sol", "gpt-6.1-sol", "high");
-    resolves("gpt-6.1-sol", "gpt-6.1-sol", "high");
-    resolves("gpt-astra", "gpt-6-astra", "xhigh");
-    resolves("gpt-6-astra", "gpt-6-astra", "xhigh");
+    resolves("gpt-sol", "gpt-6.2-sol", "high");
+    resolves("gpt-5.6-sol", "gpt-6.2-sol", "high");
+    resolves("gpt-6-sol", "gpt-6.2-sol", "high");
+    resolves("gpt-6.1-sol", "gpt-6.2-sol", "high");
+    resolves("gpt-6.2-sol", "gpt-6.2-sol", "high");
+    resolves("gpt-astra", "gpt-6.2-astra", "xhigh");
+    resolves("gpt-6-astra", "gpt-6.2-astra", "xhigh");
+    resolves("gpt-6.2-astra", "gpt-6.2-astra", "xhigh");
     resolves("gpt-terra", "gpt-6.1-terra", "medium");
     resolves("gpt-5.6-terra", "gpt-6.1-terra", "medium");
     resolves("gpt-6.1-terra", "gpt-6.1-terra", "medium");
     resolves("terra", "gpt-6.1-terra", "medium");
     CHECK_STR(v.family[3], "gpt-6.1-terra");
     CHECK_INT(v.current[3], 1);
-    models_mark_rejected("gpt-6-astra");
+    models_mark_rejected("gpt-6.2-astra");
     models_view(&v);
     CHECK_INT(v.current[2], 0);
-    resolves("astra", "gpt-6.1-sol", "high");
-    models_mark_rejected("gpt-6.1-sol");
+    resolves("astra", "gpt-6.2-sol", "high");
+    models_mark_rejected("gpt-6.2-sol");
     model_sel_t m;
     CHECK_INT(model_resolve("astra", NULL, &m), MODEL_E_UNAVAILABLE);
     resolves("terra", "gpt-6.1-terra", "medium");
@@ -143,7 +146,7 @@ TEST(failed_network_fetch_uses_fallback_until_success) {
     models_view_t v; models_view(&v);
     CHECK_INT(v.from_backend, 0);
     CHECK(v.loaded_at > 0); /* age still describes the last successful fetch */
-    resolves("gpt-sol", "gpt-6.1-sol", "high");
+    resolves("gpt-sol", "gpt-6.2-sol", "high");
     CHECK_INT(load_fixture(), 0);
     resolves("gpt-sol", "gpt-6.1-sol", "high");
     models_view(&v); CHECK_INT(v.from_backend, 1);
@@ -179,8 +182,14 @@ TEST(rejected_single_version_and_exhausted_sol) {
     models_catalog_fetch_failed();
     models_view(&v);
     CHECK_INT(v.from_backend, 0);
-    CHECK_STR(v.family[2], "gpt-6.1-sol");
-    resolves("astra", "gpt-6.1-sol", "high");
+    CHECK_INT(v.current[2], 1);
+    CHECK_STR(v.family[2], "gpt-6.2-astra");
+    resolves("astra", "gpt-6.2-astra", "xhigh");
+    models_mark_rejected("gpt-6.2-astra");
+    models_view(&v);
+    CHECK_INT(v.current[2], 0);
+    CHECK_STR(v.family[2], "gpt-6.2-sol");
+    resolves("astra", "gpt-6.2-sol", "high");
 
     CHECK_INT(load_fixture(), 0);
     models_mark_rejected("gpt-6.1-sol");
@@ -207,15 +216,15 @@ TEST(rejected_single_version_and_exhausted_sol) {
 TEST(fallback_rejections_survive_failed_refresh) {
     CHECK_INT(load_fixture(), 0);
     models_catalog_fetch_failed();
-    models_mark_rejected("gpt-6.1-sol");
+    models_mark_rejected("gpt-6.2-sol");
     resolves("luna", "gpt-6-luna", "low");
-    resolves("astra", "gpt-6-astra", "xhigh");
+    resolves("astra", "gpt-6.2-astra", "xhigh");
     model_sel_t m;
     CHECK_INT(model_resolve("sol", NULL, &m), MODEL_E_UNAVAILABLE);
     resolves("terra", "gpt-6.1-terra", "medium");
     CHECK_INT(models_list(NULL, 0), 3);
     models_mark_rejected("gpt-6-luna");
-    models_mark_rejected("gpt-6-astra");
+    models_mark_rejected("gpt-6.2-astra");
     models_mark_rejected("gpt-6.1-terra");
     models_view_t v; models_view(&v);
     CHECK_INT(v.from_backend, 0);
@@ -228,8 +237,12 @@ TEST(fallback_rejections_survive_failed_refresh) {
     CHECK_INT(model_resolve("astra", NULL, &m), MODEL_E_UNAVAILABLE);
     CHECK_INT(model_resolve("terra", NULL, &m), MODEL_E_UNAVAILABLE);
     CHECK_INT(models_list(NULL, 0), 0);
+    CHECK_INT(load_nov17(), 0);
+    models_view(&v);
+    CHECK_INT(v.from_backend, 1);
+    resolves("astra", "gpt-6.2-astra", "xhigh");
+    resolves("sol", "gpt-6.2-sol", "high");
     CHECK_INT(load_fixture(), 0);
-    resolves("astra", "gpt-6-astra", "xhigh");
 }
 
 TEST(terra_only_newest_generation) {
@@ -331,9 +344,9 @@ TEST(fallback_terra_rejected_uses_sol) {
     models_view_t v; models_view(&v);
     CHECK_INT(v.from_backend, 0);
     CHECK_INT(v.current[3], 0);
-    CHECK_STR(v.family[3], "gpt-6.1-sol");
-    resolves("terra", "gpt-6.1-sol", "high");
-    resolves("gpt-5.6-terra", "gpt-6.1-sol", "high");
+    CHECK_STR(v.family[3], "gpt-6.2-sol");
+    resolves("terra", "gpt-6.2-sol", "high");
+    resolves("gpt-5.6-terra", "gpt-6.2-sol", "high");
     CHECK_INT(load_fixture(), 0);
 }
 
@@ -383,6 +396,39 @@ TEST(effort_and_errors) {
     CHECK_STR(m.slug, "gpt-6-luna"); CHECK_STR(m.effort, "low"); CHECK_INT(m.remapped, 1);
 }
 
+TEST(catalog_2026_11_17) {
+    CHECK_INT(load_nov17(), 0);
+    models_view_t v; models_view(&v);
+    CHECK_INT(v.from_backend, 1);
+    CHECK_STR(v.family[0], "gpt-6-luna");
+    CHECK_STR(v.family[1], "gpt-6.2-sol");
+    CHECK_STR(v.family[2], "gpt-6.2-astra");
+    CHECK_STR(v.family[3], "gpt-6.1-terra");
+    CHECK_INT(v.current[0], 1); CHECK_INT(v.current[1], 1);
+    CHECK_INT(v.current[2], 1); CHECK_INT(v.current[3], 1);
+    char names[4][MODEL_SLUG_MAX];
+    CHECK_INT(models_list(names, 4), 4);
+    CHECK_STR(names[0], "gpt-6-luna");
+    CHECK_STR(names[1], "gpt-6.2-sol");
+    CHECK_STR(names[2], "gpt-6.2-astra");
+    CHECK_STR(names[3], "gpt-6.1-terra");
+    resolves("sol", "gpt-6.2-sol", "high");
+    resolves("gpt-sol", "gpt-6.2-sol", "high");
+    resolves("gpt-6.1-sol", "gpt-6.2-sol", "high");
+    resolves("gpt-6-sol", "gpt-6.2-sol", "high");
+    resolves("astra", "gpt-6.2-astra", "xhigh");
+    resolves("gpt-astra", "gpt-6.2-astra", "xhigh");
+    resolves("gpt-6-astra", "gpt-6.2-astra", "xhigh");
+    resolves("gpt-6.2-astra", "gpt-6.2-astra", "xhigh");
+    resolves("gpt-5.6-terra", "gpt-6.1-terra", "medium");
+    models_mark_rejected("gpt-6.2-astra");
+    models_view(&v);
+    CHECK_INT(v.current[2], 1);
+    resolves("astra", "gpt-6-astra", "xhigh");
+    models_mark_rejected("gpt-6.2-sol");
+    resolves("sol", "gpt-6.1-sol", "high");
+}
+
 int main(void) {
     RUN(fallback_and_aliases);
     RUN(today_catalog_and_list);
@@ -400,5 +446,6 @@ int main(void) {
     RUN(fallback_terra_rejected_uses_sol);
     RUN(retired_terra_is_never_a_candidate);
     RUN(effort_and_errors);
+    RUN(catalog_2026_11_17);
     TEST_MAIN_END();
 }

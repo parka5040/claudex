@@ -67,7 +67,7 @@ Model families: `luna`, `terra`, `sol`, `astra`. Use `gpt-luna`, `gpt-terra`, `g
 current model. It fetches the backend model catalog at startup and every six hours; only listed,
 API-supported GPT family slugs count. A family is current when served in the newest generation.
 Otherwise it uses sol. Until a successful catalog fetch (or after a failed one), fallback models
-are `gpt-6-luna`, `gpt-6.1-terra`, `gpt-6.1-sol`, `gpt-6-astra`. As of 2026-10-29 those are
+are `gpt-6-luna`, `gpt-6.1-terra`, `gpt-6.2-sol`, `gpt-6.2-astra`. As of 2026-11-17 those are
 also the served models for the four families. A rejected model triggers a refresh; retrying a
 failed request may reach a replacement, but that request still fails. `/v1/models` lists the
 current families; `/healthz` reports the resolution and whether it came from the backend
@@ -131,7 +131,7 @@ rows appear live in the agent panel and the Agent tool notifies the parent when 
 GPT agents finish by calling SubagentHandback like native agents, and each is capped at 200 turns.
 GPT text appears when each step completes, not live as its text is streamed. Agent rows show
 the type, like native agents; `/tasks` shows the resolved GPT model and effort (e.g.
-`gpt-6.1-sol (high)`) when the proxy is up, else the last status's model or the family alias.
+`gpt-6.2-sol (high)`) when the proxy is up, else the last status's model or the family alias.
 TaskStop cancels the agent's step. SendMessage resumes a finished GPT agent with its original
 working directory; the resume is refused if claudex no longer has that metadata, and never
 widens read mode to edit.
